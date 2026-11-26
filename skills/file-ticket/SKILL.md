@@ -20,9 +20,10 @@ Run `python3 -B <plugin>/scripts/house_style.py resolve` from the repo (add `--p
 - Exit code 3 (`"from": "ambiguous"`) → ask the user which of `candidates` to use, then run again with `--profile`.
 - `"from": "default"` → say in one line that no profile matched and the Default style applies (issues on the repo's own forge); `init-profile` sets one up.
 - `tracker.kind` is `none` → this repo has no tracker in its profile (e.g. its remote is neither github.com nor a GitLab host — a self-hosted GitHub needs `tracker.kind` set in a profile — and no profile names Jira). Say so and stop; offer `--profile` or `init-profile`.
-- Pass on every `resolved.warnings` line (a skipped broken profile, a git problem). Say in one line which profile applies and why — `resolved.name`, `resolved.from`, `resolved.remote` — since a cloned repo's own remote picks it.
+- Exit code 3 can also mean two **overrides** inside one profile tie (`candidates` like `Org/One`); ask the same way and pass `--profile Org/One`.
+- Pass on every `resolved.warnings` line (a skipped broken profile, a git problem). Say in one line which profile applies and why — `resolved.name`, plus `resolved.override` when one applied, `resolved.from` / `resolved.override_from` and `resolved.remote` — since a cloned repo's own remote picks it. Write the profile as `Name/Override` when an override applied, and pass that same value to every `--profile` below.
 
-Keep from it: `tracker.kind` (`github`, `gitlab` or `jira`; for Jira also `tracker.site`, whose hostname is the Atlassian MCP's `cloudId`), `tickets.types` (each type's `name`, `labels` and `template` path), `tickets.fields` (Jira only; a fields guide, or absent), `tickets.urgency` and `tickets.max_summary`.
+Keep from it: `tracker.kind` (`github`, `gitlab` or `jira`; for Jira also `tracker.site`, whose hostname is the Atlassian MCP's `cloudId`), the destination it sets — `tracker.project` (Jira's default project) or `tracker.repo` (the forge repo issues go to) — `tickets.types` (each type's `name`, `labels` and `template` path), `tickets.fields` (Jira only; a fields guide, or absent), `tickets.urgency` and `tickets.max_summary`.
 
 Then read the tracker's reference — [`reference/forge.md`](reference/forge.md) for `github` and `gitlab`, [`reference/jira.md`](reference/jira.md) for `jira` — for the steps that differ.
 
@@ -38,7 +39,7 @@ Done when: the mode is chosen, and exactly one type from the profile.
 
 ## Step 2 — Pick where it goes
 
-Follow the tracker's reference: a **Jira** ticket needs a project key; a **forge** issue goes to the current repo unless the user names another.
+Follow the tracker's reference: a **Jira** ticket goes to the user's named project, else the profile's `tracker.project`, else one inferred from the repo; a **forge** issue goes to the repo the user names, else the profile's `tracker.repo`, else the current repo.
 
 Done when: the destination is set by the user or backed by evidence you can cite, or the question is queued for Step 3.
 
@@ -82,7 +83,8 @@ Done when: the build succeeds, and the draft contains no secret or personal data
 
 Show the user, as readable text (rendered headers, real lists — not the JSON spec):
 
-- the profile and tracker, the destination (Jira project, or forge repo), the type, and the summary with its character count;
+- the profile (`Name/Override`) and tracker, the destination exactly as the build's `destination:` line gives it — Jira project or forge repo, and where it came from — the type, and the summary with its character count;
+- any `note:` line the build printed (an explicit project replacing the profile's, or an issue going to a repo other than this one), **asked as an explicit question**: the user confirms that destination before you go on;
 - the description;
 - what the build printed: the Jira keys that will be linked as Relates, or the forge labels that will be applied;
 - for a type with urgency, one line outside the ticket naming the rubric line behind the level;

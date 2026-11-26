@@ -4,7 +4,13 @@ How Steps 2, 3, 5 and 7 run when the profile's `tracker.kind` is `jira`. Create 
 
 ## Project (Step 2)
 
-Only an explicit instruction from the user in this session ("in ABC", "project XYZ") sets the project. Ticket keys merely mentioned in the subject or elsewhere are evidence, not a decision. Without an instruction, and only when you're working in a git repo, infer it from the repo: ticket keys in the branch name and recent commit messages (`git log --oneline -30`), and any project key in the repo's `CLAUDE.md` or README. **If no source yields a key, sources disagree, or you're unsure, ask** — in Step 3's batch.
+In this order:
+
+1. An explicit instruction from the user in this session ("in ABC", "project XYZ") — pass it as `--project`. Ticket keys merely mentioned in the subject or elsewhere are evidence, not a decision.
+2. The profile's `tracker.project` (Step 0) — user configuration. The build uses it when `--project` is left out; say it in Step 0's line.
+3. Without either, and only when you're working in a git repo, infer it from the repo: ticket keys in the branch name and recent commit messages (`git log --oneline -30`), and any project key in the repo's `CLAUDE.md` or README.
+
+**Ask** — in Step 3's batch — if no source yields a key, if you're unsure, or if keys in the branch or commits disagree with `tracker.project` (it may be the wrong override, or work for another project).
 
 ## Fields (Step 3)
 
@@ -16,7 +22,7 @@ Only when the profile names a fields guide (`tickets.fields`): once the project 
 python3 -B <skill-dir>/scripts/ticket.py <work-dir>/spec.json <work-dir> --type <type> --project <KEY>
 ```
 
-Add `--profile <Name>` if Step 0 needed one, `--update <KEY>` in update mode, and `--projects ABC,XYZ` (project keys, not ticket keys) for any other project mentioned — keys of those, of the profile's `link_projects` and of `--project` become browse links. It writes `<work-dir>/description.md` (Markdown for the MCP, which converts it to ADF), `workitem.json` and `description.json` for the fallback, and prints the profile, the keys it will link and the fields.
+`--project` may be left out when the profile sets `tracker.project`; the build prints the `destination:` it used, and a `note:` when `--project` replaces the profile's. Add `--profile <Name or Name/Override>` if Step 0 needed one, `--update <KEY>` in update mode, and `--projects ABC,XYZ` (project keys, not ticket keys) for any other project mentioned — keys of those, of the profile's `link_projects` and of `--project` become browse links. It writes `<work-dir>/description.md` (Markdown for the MCP, which converts it to ADF), `workitem.json` and `description.json` for the fallback, and prints the profile, the keys it will link and the fields.
 
 ## Create (Step 7.2–7.4)
 

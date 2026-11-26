@@ -17,6 +17,8 @@ Save the description to `<work-dir>/original.*` and note when it was last update
 | GitLab | `glab issue view <n> -F json` (`description`, `labels`, `state`, `updated_at`) | as GitHub |
 | Jira | `getJiraIssue` with `responseContentFormat: html` and `view: "evidence"` (fields, links and custom fields) | the profile type whose `name` equals its issue type |
 
+On a forge, the ticket's repo is chosen as in [`forge.md`](forge.md) (a repo the user names, else the profile's `tracker.repo`, else `origin`); every `gh`/`glab` command in this file then takes `-R "<repo>"` when that isn't `origin`.
+
 **Stop before drafting** when:
 
 | Found | Why | Instead |
