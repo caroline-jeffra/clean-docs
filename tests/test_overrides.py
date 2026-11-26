@@ -287,5 +287,33 @@ class ResolveOverrides(unittest.TestCase):
         self.assertEqual(run('resolve', '--repo', self.repo, '--profile', 'Org/Two').returncode, 0)
 
 
+class ValidateCli(unittest.TestCase):
+    def run_validate(self, data):
+        with tempfile.TemporaryDirectory() as pdir:
+            write(os.path.join(pdir, 'Org'), 'profile.json', {'schema': 1, **data})
+            return subprocess.run(
+                [sys.executable, '-B', SCRIPT, 'validate', os.path.join(pdir, 'Org')], capture_output=True, text=True
+            )
+
+    def test_each_override_is_loaded(self):
+        ok = self.run_validate(
+            {'tracker': JIRA, 'overrides': {'Gadget': {'match': {'repos': ['b']}, 'tracker': {'project': 'GDG'}}}}
+        )
+        self.assertEqual((ok.returncode, ok.stdout.strip()), (0, 'ok'))
+        bad = self.run_validate(
+            {
+                'tracker': {'kind': 'github'},
+                'overrides': {
+                    'Gadget': {'match': {'repos': ['b']}, 'tracker': {'project': 'GDG'}},
+                    'Web': {'match': {'repos': ['w']}, 'tracker': {'kind': 'jira'}},
+                },
+            }
+        )
+        self.assertEqual(bad.returncode, 1)
+        self.assertIn('Org/Gadget', bad.stdout)
+        self.assertIn('Org/Web', bad.stdout)  # jira without a site, reported too
+        self.assertNotIn('Traceback', bad.stderr)
+
+
 if __name__ == '__main__':
     unittest.main()

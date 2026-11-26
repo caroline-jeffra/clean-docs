@@ -9,16 +9,21 @@ templates it names. Profiles live outside this plugin, in a profiles directory:
 The plugin ships one profile, Default, under profiles/Default. Every other profile
 is laid over it: objects merge key by key, anything else replaces, and a null
 removes the key. Null is allowed only where removing makes sense: a ticket type
-("types": {"task": null}), tickets.fields, tickets.urgency, on_ship.comment and
-on_ship.transition. A template named in a profile is looked up in that profile's
-folder first, then in Default.
+("types": {"task": null}), tickets.fields, tickets.urgency, on_ship.comment,
+on_ship.transition, tracker.project and tracker.repo. A template named in a profile
+is looked up in that profile's folder first, then in Default.
+
+A profile may hold named "overrides" for single repos: {"Gadget": {"match": {...},
+"tracker": {"project": "GDG"}}}. Each has its own match and is laid over the
+profile the same way, so the order is Default, then the profile, then the override.
 
 Usage:
-  python3 house_style.py resolve [--repo PATH] [--profile NAME]
+  python3 house_style.py resolve [--repo PATH] [--profile NAME[/OVERRIDE]]
       Print the merged profile for the repo as JSON, with every template as an
       absolute path and a "resolved" object saying which profile matched, why,
-      and any warnings (a skipped broken profile, a git problem).
-      Exits 3 when two profiles match equally well ("resolved.from" is
+      which override applied ("override", "override_from"), and any warnings.
+      --profile NAME still matches NAME's overrides; NAME/OVERRIDE forces one.
+      Exits 3 when two profiles, or two overrides in one, match equally well ("resolved.from" is
       "ambiguous"): ask the user, then run again with --profile.
   python3 house_style.py validate DIR
       Check one profile folder; prints "ok" or one error per line (exit 1).
@@ -28,6 +33,8 @@ repo), ignoring case:
   - a "repos" entry equal to the repo name beats any remote glob;
   - otherwise the remote glob with the most literal characters wins;
   - a tie is ambiguous; no match falls back to Default.
+  - a profile scores the best of its own match and its overrides' matches;
+    inside the chosen profile the best-matching override applies, by the same rules.
 Remotes are compared as host/path without scheme, credentials, port or ".git":
   git@github.com:acme/widget.git and https://github.com/acme/widget both read
   github.com/acme/widget.
@@ -467,7 +474,8 @@ def load(name, folder, remote=None, override=None):
     if declared == 'auto':
         tracker['kind'] = infer_tracker(remote)
     if tracker['kind'] == 'jira' and not tracker.get('site'):
-        raise ProfileError(f'{name}: a jira tracker needs "tracker.site"')
+        who = f'{name}/{override}' if override else name
+        raise ProfileError(f'{who}: a jira tracker needs "tracker.site"')
     links = tracker.get('link_projects', [])
     tracker['link_projects'] = list(dict.fromkeys([*links, tracker['project']] if 'project' in tracker else links))
 
@@ -562,9 +570,14 @@ def main(argv=None):
             folder = os.path.abspath(args.dir)
             name = os.path.basename(folder)
             errors = [] if NAME.fullmatch(name) else [f'{name}: profile folders are named in PascalCase']
-            errors += validate(read_json(folder), f'{name}/profile.json', folder)
+            raw = read_json(folder)
+            errors += validate(raw, f'{name}/profile.json', folder)
             if not errors:
-                load(name, folder)
+                for override in (None, *overrides_of(raw)):
+                    try:
+                        load(name, folder, override=override)
+                    except ProfileError as e:
+                        errors.append(str(e))
             print('\n'.join(errors) if errors else 'ok')
             return 1 if errors else 0
         profile = resolve(args.repo, args.profile)
