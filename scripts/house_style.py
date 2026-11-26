@@ -51,8 +51,18 @@ PROJECT_KEY = re.compile(r'[A-Z][A-Z0-9]{1,9}')
 TYPE_KEY = re.compile(r'[a-z][a-z0-9-]*')
 SITE = re.compile(r'https://[A-Za-z0-9.-]+(?::\d{1,5})?(?:/[A-Za-z0-9._~-]+)*/?')
 LABEL = re.compile(r'[^\x00-\x1f\x7f"`$\\]+')
+FORGE_REPO = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)+')
 TRACKERS = ('auto', 'jira', 'github', 'gitlab', 'none')
-NULLABLE = ('tickets.types.*', 'tickets.fields', 'tickets.urgency', 'on_ship.comment', 'on_ship.transition')
+NULLABLE = (
+    'tickets.types.*',
+    'tickets.fields',
+    'tickets.urgency',
+    'on_ship.comment',
+    'on_ship.transition',
+    'tracker.project',
+    'tracker.repo',
+)
+LAYER_KEYS = ('match', 'tracker', 'request', 'tickets', 'on_ship')
 AMBIGUOUS = 3
 
 
@@ -246,7 +256,28 @@ def null_paths(obj, prefix=''):
 
 
 def validate(data, where, folder):
-    """Return a list of errors for one profile.json (raw, before merging)."""
+    """Return a list of errors for one profile.json (raw, before merging), its overrides included."""
+    errors = validate_layer(data, where, folder, override=False)
+    if 'overrides' not in data or not isinstance(data, dict):
+        return errors
+    overrides = data['overrides']
+    if not isinstance(overrides, dict):
+        if overrides is not None:  # null is reported by validate_layer
+            errors.append(f'{where}: "overrides" must be an object of named overrides')
+        return errors
+    for name, layer in overrides.items():
+        label = f'{where} overrides.{name}'
+        if not NAME.fullmatch(name):
+            errors.append(f'{label}: override names are PascalCase, like profile names')
+        if not isinstance(layer, dict):
+            errors.append(f'{label}: must be an object with a "match" and the settings it overrides')
+            continue
+        errors += validate_layer(layer, label, folder, override=True)
+    return errors
+
+
+def validate_layer(data, where, folder, override):
+    """Errors for one layer: the profile itself, or one of its overrides."""
     errors = []
 
     def err(msg):
@@ -269,15 +300,21 @@ def validate(data, where, folder):
         elif not (os.path.isfile(os.path.join(folder, value)) or os.path.isfile(os.path.join(DEFAULT_DIR, value))):
             err(f'"{label}": {value} is in neither this profile nor Default')
 
-    for path in null_paths(data):
+    scan = {k: v for k, v in data.items() if k != 'overrides' or v is None}
+    for path in null_paths(scan):
         if not any(fnmatch.fnmatchcase(path, allowed) for allowed in NULLABLE):
             err(f'"{path}" can\'t be null; null removes only {", ".join(NULLABLE)}')
     data = {k: v for k, v in data.items() if v is not None}
 
-    check_keys(data, ('schema', 'match', 'tracker', 'request', 'tickets', 'on_ship'), '')
-    schema = data.get('schema')
-    if type(schema) is not int or schema != SCHEMA:
-        err(f'"schema" must be {SCHEMA}')
+    if override:
+        check_keys(data, LAYER_KEYS, '')
+        if 'match' not in data:
+            err('an override needs a "match" saying which repos it applies to')
+    else:
+        check_keys(data, ('schema', *LAYER_KEYS, 'overrides'), '')
+        schema = data.get('schema')
+        if type(schema) is not int or schema != SCHEMA:
+            err(f'"schema" must be {SCHEMA}')
 
     match = data.get('match', {})
     if check_keys(match, ('remotes', 'repos'), 'match'):
@@ -285,9 +322,21 @@ def validate(data, where, folder):
             value = match.get(key, [])
             if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
                 err(f'"match.{key}" must be a list of non-empty strings')
+        if override and 'match' in data and not any(match.get(k) for k in ('remotes', 'repos')):
+            err('"match" needs at least one entry in "repos" or "remotes"')
 
     tracker = data.get('tracker', {})
-    if check_keys(tracker, ('kind', 'site', 'link_projects'), 'tracker'):
+    if check_keys(tracker, ('kind', 'site', 'link_projects', 'project', 'repo'), 'tracker'):
+        if tracker.get('project') is not None and not (
+            isinstance(tracker['project'], str) and PROJECT_KEY.fullmatch(tracker['project'])
+        ):
+            err('"tracker.project" must be a Jira project key such as "ABC"')
+        if tracker.get('repo') is not None and not (
+            isinstance(tracker['repo'], str)
+            and FORGE_REPO.fullmatch(tracker['repo'])
+            and '..' not in tracker['repo'].split('/')
+        ):
+            err('"tracker.repo" must be a forge repo path such as "owner/repo" or "group/sub/repo"')
         if 'kind' in tracker and tracker['kind'] not in TRACKERS:
             err(f'"tracker.kind" must be one of {list(TRACKERS)}')
         if 'site' in tracker and not (isinstance(tracker['site'], str) and SITE.fullmatch(tracker['site'])):
