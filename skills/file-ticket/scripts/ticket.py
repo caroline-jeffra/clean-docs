@@ -425,7 +425,10 @@ def load_profile(repo, name):
         sys.exit(f'profile error: {e}')
     resolved = profile['resolved']
     if resolved['from'] == 'ambiguous':
-        sys.exit(f'profile error: several profiles match this repo equally: {resolved["candidates"]}; pass --profile')
+        sys.exit(
+            'profile error: several profiles or overrides match this repo equally: '
+            f'{resolved["candidates"]}; pass --profile Name or Name/Override'
+        )
     kind = profile['tracker']['kind']
     if kind not in ('jira', *FORGES):
         sys.exit(f'profile error: {resolved["name"]} has tracker "{kind}"; file-ticket needs jira, github or gitlab')
@@ -501,7 +504,8 @@ def main():
 
     prepare(args.out_dir)
     resolved = profile['resolved']
-    print(f'profile: {resolved["name"]} ({resolved["from"]}), tracker: {kind}')
+    shown = f'{resolved["name"]}/{resolved["override"]}' if resolved.get('override') else resolved['name']
+    print(f'profile: {shown} ({resolved["from"]}), tracker: {kind}')
     for warning in resolved.get('warnings', []):
         print(f'warning: {warning}')
     if kind == 'jira':
