@@ -1,29 +1,41 @@
-"""Build a Jira description from a ticket spec, enforcing the profile's template for its type.
+"""Build a ticket from a spec, enforcing the profile's template for its type, for the profile's tracker.
 
-Usage: python3 adf.py SPEC.json OUT_DIR --type TYPE --project KEY [--projects ABC,XYZ]
-                      [--update KEY-123] [--profile NAME] [--repo PATH]
+Usage: python3 ticket.py SPEC.json OUT_DIR --type TYPE [--project KEY] [--projects ABC,XYZ]
+                         [--update REF] [--profile NAME] [--repo PATH]
 
 The house style comes from the clean-docs profile for the repo (scripts/house_style.py
 at the plugin root; --profile picks one by name). From it this script takes the
-Jira site, the projects always linked, the summary limit, the ticket types, each
-type's template and the urgency levels.
+tracker, the summary limit, the ticket types, each type's template and the urgency
+levels. Trackers:
 
---update builds the description for an existing ticket (reference/update.md): the
-first line says it was restructured, and workitem.json is in the shape of
+  github, gitlab  An issue. Writes OUT_DIR/title.txt, OUT_DIR/body.md (Markdown with
+                  ### headings) and OUT_DIR/issue.json ({"title", "labels", "update"}).
+                  Labels come from the type's "labels". References are #12 or
+                  group/repo#12, left for the forge to link. --update takes the issue
+                  number. --project, --projects and "fields" are Jira-only.
+  jira            A Jira work item. --project is required; --update takes a key in it.
+                  Writes OUT_DIR/description.md (Markdown for the Atlassian MCP's
+                  createJiraIssue and editJiraIssue), and for the acli fallback
+                  OUT_DIR/workitem.json (for `acli jira workitem create --from-json`,
+                  so no ticket text passes through the shell) and OUT_DIR/description.json
+                  (the ADF alone, for `acli jira workitem edit --description-file`).
+                  Keys of the profile's link_projects, --project and any --projects
+                  become links to the browse page.
+
+--update builds the body for an existing ticket (reference/update.md): the first line
+says it was restructured; on Jira, workitem.json is in the shape of
 `acli jira workitem edit --from-json`, which has no custom fields.
 
 SPEC.json is {"summary": "...", "blocks": [...], "fields": {...}}, each block a one-key object:
-  {"h": "Header"}            bold paragraph
+  {"h": "Header"}            section header
   {"p": "Text"}              paragraph
   {"ul": ["item", ...]}      bullet list
   {"ol": ["item", ...]}      ordered list
 
-The optional "fields" sets components and single-select custom fields:
+The optional "fields" (Jira only) sets components and single-select custom fields:
   {"customfield_10000": {"value": "Option"}, "components": [{"name": "Name"}]}
 
-In any text, `backticks` become inline code and ticket keys become links to the
-Jira browse page. Keys of the profile's link_projects, --project and any
---projects are linked.
+In any text, `backticks` become inline code.
 
 A template is the type's Markdown file, whose table rows read
   | <n> | <Header> | <Block> | <yes|no> | <content> |
@@ -33,19 +45,16 @@ content. The script refuses a spec unless:
   - the summary fits the profile's max_summary;
   - the first block is the generated-ticket line, with an urgency level from the
     profile's rubric when the type has urgency. The level is written plain in the
-    spec and rendered bold in both outputs;
+    spec and rendered bold;
   - the headers are exactly the template's, in order, each section holding only
     its allowed block kinds;
   - every required section has content;
   - code spans appear only in the files section, which is a bullet list of `path`
-    items or the not-investigated line, optionally followed by an Overlaps line.
+    items or the not-investigated line, optionally followed by an Overlaps line
+    naming related tickets in the tracker's reference form.
 
-Writes OUT_DIR/description.md (markdown for the Atlassian MCP's createJiraIssue
-and editJiraIssue, which convert it to ADF), and for the acli fallback
-OUT_DIR/workitem.json (for `acli jira workitem create --from-json`, so no ticket
-text passes through the shell) and OUT_DIR/description.json (the ADF alone, for
-`acli jira workitem edit --description-file`). It prints the keys to link and
-the fields as JSON, to pass verbatim to createJiraIssue's additional_fields.
+It prints the profile and tracker, then the references to link (Jira) or the
+references and labels (forges), and the fields as JSON (Jira).
 """
 
 import argparse
@@ -66,8 +75,10 @@ URGENCY_SUFFIX = ' Assessed ticket urgency: '
 URGENCY = GENERATED + URGENCY_SUFFIX
 NOT_INVESTIGATED = 'Codebase not yet investigated.'
 CODE_SPAN = r'`[^`]+`'
-OVERLAPS = r'Overlaps with [A-Z][A-Z0-9]{1,9}-\d+(?:, [A-Z][A-Z0-9]{1,9}-\d+)*\.'
 PROJECT_KEY = r'[A-Z][A-Z0-9]{1,9}'
+JIRA_REF = r'[A-Z][A-Z0-9]{1,9}-\d+'
+FORGE_REF = r'(?:[\w.-]+(?:/[\w.-]+)+)?#\d+'
+FORGES = ('github', 'gitlab')
 BLOCK_KINDS = ('p', 'ul', 'ol')
 MD_SPECIAL = re.compile(r'([\\`*_\[\]<>~|#!])')
 MD_BLOCK_START = re.compile(r'^(\s*)([-+>]|\d+[.)])')
@@ -77,10 +88,21 @@ LEVEL = re.compile(r'^## \d+\. (.+?) — ', re.M)
 Section = namedtuple('Section', 'header kinds required')
 # sections: [Section]; files: the files section's header or None; levels: urgency levels, () for none
 Template = namedtuple('Template', 'sections files levels')
+# kind: jira | github | gitlab; refs: regex for references in text; overlap: regex for one Overlaps reference;
+# browse: Jira browse URL prefix, or None on forges (which link references themselves)
+Tracker = namedtuple('Tracker', 'kind refs overlap browse')
 
 
 def fail(msg):
     sys.exit('spec error: ' + msg)
+
+
+def jira(projects, browse):
+    return Tracker('jira', r'\b(?:' + '|'.join(map(re.escape, projects)) + r')-\d+\b', JIRA_REF, browse)
+
+
+def forge(kind):
+    return Tracker(kind, r'(?<![\w#&/])' + FORGE_REF + r'\b', FORGE_REF, None)
 
 
 # ---------------------------------------------------------------- templates
@@ -131,19 +153,32 @@ def template_for(profile, ticket_type):
 # ---------------------------------------------------------------- inline
 
 
-def key_pattern(projects):
-    return r'\b(?:' + '|'.join(map(re.escape, projects)) + r')-\d+\b'
+def split_inline(s, refs):
+    """Yield (kind, text) parts of s, kind one of 'ref', 'code' or 'text'."""
+    for part in re.split(rf'({refs}|{CODE_SPAN})', s):
+        if not part:
+            continue
+        if re.fullmatch(refs, part):
+            yield 'ref', part
+        elif re.fullmatch(CODE_SPAN, part):
+            yield 'code', part[1:-1]
+        else:
+            yield 'text', part
 
 
-def make_inline(projects, browse):
-    key = key_pattern(projects)
+def make_inline(tracker):
+    """ADF text nodes for s (Jira): references link to the browse page."""
 
     def inline(s):
         out = []
-        for kind, text in split_inline(s, key):
-            if kind == 'key':
+        for kind, text in split_inline(s, tracker.refs):
+            if kind == 'ref' and tracker.browse:
                 out.append(
-                    {'type': 'text', 'text': text, 'marks': [{'type': 'link', 'attrs': {'href': browse + text}}]}
+                    {
+                        'type': 'text',
+                        'text': text,
+                        'marks': [{'type': 'link', 'attrs': {'href': tracker.browse + text}}],
+                    }
                 )
             elif kind == 'code':
                 out.append({'type': 'text', 'text': text, 'marks': [{'type': 'code'}]})
@@ -152,19 +187,6 @@ def make_inline(projects, browse):
         return out
 
     return inline
-
-
-def split_inline(s, key):
-    """Yield (kind, text) parts of s, kind one of 'key', 'code' or 'text'."""
-    for part in re.split(rf'({key}|{CODE_SPAN})', s):
-        if not part:
-            continue
-        if re.fullmatch(key, part):
-            yield 'key', part
-        elif re.fullmatch(CODE_SPAN, part):
-            yield 'code', part[1:-1]
-        else:
-            yield 'text', part
 
 
 # ---------------------------------------------------------------- checks
@@ -187,7 +209,10 @@ def check_block(i, block):
     fail(f'block {i}: unknown kind {kind!r}')
 
 
-def check_template(blocks, template, update=False):
+def check(blocks, template, tracker, update=False):
+    """Refuse blocks that don't follow the template; see the module docstring."""
+    for i, block in enumerate(blocks):
+        check_block(i, block)
     first = blocks[0].get('p', '') if blocks else ''
     line = UPDATED if update else GENERATED
     urgency = line + URGENCY_SUFFIX
@@ -223,17 +248,19 @@ def check_template(blocks, template, update=False):
     if empty:
         fail(f'sections need content: {empty}')
     if template.files and content[template.files]:
-        check_files(template.files, content[template.files])
+        check_files(template.files, content[template.files], tracker)
 
 
-def check_files(header, blocks):
+def check_files(header, blocks, tracker):
     """The files section is a list of `path` items (or the not-investigated line), then an optional Overlaps line."""
     first, rest = blocks[0], blocks[1:]
     paths = first.get('ul')
     if not (first == {'p': NOT_INVESTIGATED} or (paths and all(re.fullmatch(CODE_SPAN, i) for i in paths))):
         fail(f'"{header}" must start with a bullet list of `path` items, or {{"p": "{NOT_INVESTIGATED}"}}')
-    if rest and (len(rest) > 1 or not re.fullmatch(OVERLAPS, rest[0].get('p', ''))):
-        fail(f'"{header}" may end only with one {{"p": "Overlaps with KEY-1, KEY-2."}}')
+    overlaps = rf'Overlaps with {tracker.overlap}(?:, {tracker.overlap})*\.'
+    if rest and (len(rest) > 1 or not re.fullmatch(overlaps, rest[0].get('p', ''))):
+        example = 'ABC-1, ABC-2' if tracker.kind == 'jira' else '#1, #2'
+        fail(f'"{header}" may end only with one {{"p": "Overlaps with {example}."}}')
 
 
 def check_fields(fields):
@@ -258,12 +285,15 @@ def check_fields(fields):
 # ---------------------------------------------------------------- output
 
 
-def build(blocks, projects, template, browse, update=False):
-    for i, block in enumerate(blocks):
-        check_block(i, block)
-    check_template(blocks, template, update)
+def split_urgency(first):
+    """Split an already-checked first line into (text up to the level, level); level is '' without urgency."""
+    head, sep, level = first.rpartition(URGENCY_SUFFIX)
+    return (head + sep, level) if sep else (first, '')
 
-    inline = make_inline(projects, browse)
+
+def adf(blocks, tracker):
+    """The ADF document for already-checked blocks (Jira)."""
+    inline = make_inline(tracker)
 
     def h(t):
         return {
@@ -291,29 +321,27 @@ def build(blocks, projects, template, browse, update=False):
     return {'version': 1, 'type': 'doc', 'content': content}
 
 
-def split_urgency(first):
-    """Split an already-checked first line into (text up to the level, level); level is '' without urgency."""
-    head, sep, level = first.rpartition(URGENCY_SUFFIX)
-    return (head + sep, level) if sep else (first, '')
+def markdown(blocks, tracker):
+    """Render already-checked blocks as Markdown; plain text is escaped so it stays literal.
 
-
-def markdown(blocks, projects, browse):
-    """Render already-checked blocks as markdown; plain text is escaped so it stays literal."""
-    key = key_pattern(projects)
+    Jira: headers are bold paragraphs and references link to the browse page.
+    Forges: headers are ### headings and references stay bare for the forge to link.
+    """
 
     def inline(s):
         out = []
-        for kind, text in split_inline(s, key):
-            if kind == 'key':
-                out.append(f'[{text}]({browse}{text})')
+        for kind, text in split_inline(s, tracker.refs):
+            if kind == 'ref':
+                out.append(f'[{text}]({tracker.browse}{text})' if tracker.browse else text)
             elif kind == 'code':
                 out.append(f'`{text}`')
             else:
                 out.append(MD_SPECIAL.sub(r'\\\1', ' '.join(text.split('\n'))))
         return MD_BLOCK_START.sub(lambda m: m.group(1) + m.group(2)[:-1] + '\\' + m.group(2)[-1], ''.join(out), count=1)
 
+    header = (lambda t: f'**{inline(t)}**') if tracker.kind == 'jira' else (lambda t: f'### {inline(t)}')
     kinds = {
-        'h': lambda t: f'**{inline(t)}**',
+        'h': header,
         'p': inline,
         'ul': lambda items: '\n'.join(f'- {inline(i)}' for i in items),
         'ol': lambda items: '\n'.join(f'{n}. {inline(i)}' for n, i in enumerate(items, 1)),
@@ -325,6 +353,21 @@ def markdown(blocks, projects, browse):
     return '\n\n'.join(rendered) + '\n'
 
 
+def references(blocks, tracker):
+    return sorted(set(re.findall(tracker.refs, json.dumps(blocks))))
+
+
+def write(out_dir, name, data):
+    with open(os.path.join(out_dir, name), 'w', encoding='utf-8') as f:
+        if isinstance(data, str):
+            f.write(data)
+        else:
+            json.dump(data, f)
+
+
+# ---------------------------------------------------------------- main
+
+
 def load_profile(repo, name):
     try:
         profile = house_style.resolve(repo, name)
@@ -333,42 +376,14 @@ def load_profile(repo, name):
     resolved = profile['resolved']
     if resolved['from'] == 'ambiguous':
         sys.exit(f'profile error: several profiles match this repo equally: {resolved["candidates"]}; pass --profile')
-    tracker = profile['tracker']
-    if tracker['kind'] != 'jira':
-        sys.exit(f'profile error: {resolved["name"]} files tickets in "{tracker["kind"]}", and file-ticket needs jira')
+    kind = profile['tracker']['kind']
+    if kind not in ('jira', *FORGES):
+        sys.exit(f'profile error: {resolved["name"]} has tracker "{kind}"; file-ticket needs jira, github or gitlab')
     return profile
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    ap.add_argument('spec')
-    ap.add_argument('out_dir')
-    ap.add_argument('--type', required=True, type=str.lower)
-    ap.add_argument('--project', required=True, type=str.upper)
-    ap.add_argument('--projects', default='', help='extra project keys to link, comma-separated')
-    ap.add_argument('--update', metavar='KEY', type=str.upper, help='existing ticket whose description this replaces')
-    ap.add_argument('--profile', help='profile name (default: the one matching --repo)')
-    ap.add_argument('--repo', default='.', help='repo to match a profile for (default: %(default)s)')
-    args = ap.parse_args()
-
-    profile = load_profile(args.repo, args.profile)
-    types = profile['tickets']['types']
-    if args.type not in types:
-        sys.exit(f"--type must be one of the profile's types: {sorted(types)}")
-    if not re.fullmatch(PROJECT_KEY, args.project):
-        sys.exit('--project must be a Jira project key such as ABC')
-    extra = [k.strip().upper() for k in args.projects.split(',') if k.strip()]
-    bad = [k for k in extra if not re.fullmatch(PROJECT_KEY, k)]
-    if bad:
-        sys.exit(f'--projects takes project keys such as ABC, not {bad}')
-    if args.update and not re.fullmatch(rf'{re.escape(args.project)}-\d+', args.update):
-        sys.exit('--update takes a ticket key in --project, such as ABC-123')
-    browse = profile['tracker']['site'].rstrip('/') + '/browse/'
-    projects = list(dict.fromkeys(profile['tracker']['link_projects'] + [args.project] + extra))
-    template = template_for(profile, args.type)
-    max_summary = profile['tickets']['max_summary']
-
-    with open(args.spec, encoding='utf-8-sig') as f:
+def read_spec(path, max_summary):
+    with open(path, encoding='utf-8-sig') as f:
         spec = json.load(f)
     if (
         not isinstance(spec, dict)
@@ -376,35 +391,91 @@ def main():
         or not isinstance(spec.get('blocks'), list)
     ):
         fail('top level must be {"summary": "...", "blocks": [...]}')
-    fields = spec.get('fields', {})
-    check_fields(fields)
     summary = spec['summary'].strip()
     if not summary:
         fail('summary is empty')
+    if '\n' in summary:
+        fail('summary must be one line')
     if len(summary) > max_summary:
         fail(f'summary is {len(summary)} characters; the limit is {max_summary}')
+    return summary, spec['blocks'], spec.get('fields', {})
 
-    description = build(spec['blocks'], projects, template, browse, bool(args.update))
-    if args.update:
-        workitem = {'issues': [args.update], 'summary': summary, 'description': description}
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+    ap.add_argument('spec')
+    ap.add_argument('out_dir')
+    ap.add_argument('--type', required=True, type=str.lower)
+    ap.add_argument('--project', type=str.upper, help='Jira project key (Jira only)')
+    ap.add_argument('--projects', default='', help='extra Jira project keys to link, comma-separated')
+    ap.add_argument('--update', metavar='REF', help='existing ticket this replaces: a Jira key, or an issue number')
+    ap.add_argument('--profile', help='profile name (default: the one matching --repo)')
+    ap.add_argument('--repo', default='.', help='repo to match a profile for (default: %(default)s)')
+    args = ap.parse_args()
+
+    profile = load_profile(args.repo, args.profile)
+    kind = profile['tracker']['kind']
+    types = profile['tickets']['types']
+    if args.type not in types:
+        sys.exit(f"--type must be one of the profile's types: {sorted(types)}")
+    template = template_for(profile, args.type)
+
+    if kind == 'jira':
+        if not (args.project and re.fullmatch(PROJECT_KEY, args.project)):
+            sys.exit('--project must be a Jira project key such as ABC')
+        extra = [k.strip().upper() for k in args.projects.split(',') if k.strip()]
+        bad = [k for k in extra if not re.fullmatch(PROJECT_KEY, k)]
+        if bad:
+            sys.exit(f'--projects takes project keys such as ABC, not {bad}')
+        update = args.update.upper() if args.update else None
+        if update and not re.fullmatch(rf'{re.escape(args.project)}-\d+', update):
+            sys.exit('--update takes a ticket key in --project, such as ABC-123')
+        browse = profile['tracker']['site'].rstrip('/') + '/browse/'
+        tracker = jira(list(dict.fromkeys(profile['tracker']['link_projects'] + [args.project] + extra)), browse)
     else:
-        workitem = {
-            'projectKey': args.project,
-            'type': types[args.type]['name'],
-            'summary': summary,
-            'description': description,
-        }
-        if fields:
-            workitem['additionalAttributes'] = fields
-    for name, data in (('workitem.json', workitem), ('description.json', description)):
-        with open(os.path.join(args.out_dir, name), 'w', encoding='utf-8') as f:
-            json.dump(data, f)
-    with open(os.path.join(args.out_dir, 'description.md'), 'w', encoding='utf-8') as f:
-        f.write(markdown(spec['blocks'], projects, browse))
-    linkable = set(re.findall(key_pattern(projects), json.dumps(spec['blocks']))) - {args.update}
-    print(f'profile: {profile["resolved"]["name"]} ({profile["resolved"]["from"]})')
-    print(f'linkable keys: {sorted(linkable)}')
-    print(f'fields: {json.dumps(fields)}')
+        if args.project or args.projects:
+            sys.exit(f'--project and --projects are Jira-only; this profile files {kind} issues')
+        update = None
+        if args.update:
+            m = re.fullmatch(r'#?(\d+)', args.update.strip())
+            if not m:
+                sys.exit('--update takes an issue number such as 12 or #12')
+            update = int(m.group(1))
+        tracker = forge(kind)
+
+    summary, blocks, fields = read_spec(args.spec, profile['tickets']['max_summary'])
+    check_fields(fields)
+    if fields and kind != 'jira':
+        fail(f'"fields" are Jira-only; this profile files {kind} issues')
+    check(blocks, template, tracker, update is not None)
+
+    resolved = profile['resolved']
+    print(f'profile: {resolved["name"]} ({resolved["from"]}), tracker: {kind}')
+    if kind == 'jira':
+        description = adf(blocks, tracker)
+        if update:
+            workitem = {'issues': [update], 'summary': summary, 'description': description}
+        else:
+            workitem = {
+                'projectKey': args.project,
+                'type': types[args.type]['name'],
+                'summary': summary,
+                'description': description,
+            }
+            if fields:
+                workitem['additionalAttributes'] = fields
+        write(args.out_dir, 'workitem.json', workitem)
+        write(args.out_dir, 'description.json', description)
+        write(args.out_dir, 'description.md', markdown(blocks, tracker))
+        print(f'linkable keys: {[k for k in references(blocks, tracker) if k != update]}')
+        print(f'fields: {json.dumps(fields)}')
+    else:
+        labels = types[args.type]['labels']
+        write(args.out_dir, 'title.txt', summary)
+        write(args.out_dir, 'body.md', markdown(blocks, tracker))
+        write(args.out_dir, 'issue.json', {'title': summary, 'labels': labels, 'update': update})
+        print(f'references: {references(blocks, tracker)}')
+        print(f'labels: {json.dumps(labels)}')
 
 
 if __name__ == '__main__':

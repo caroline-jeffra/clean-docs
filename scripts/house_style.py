@@ -248,10 +248,13 @@ def validate(data, where, folder):
                     err(f'"tickets.types.{key}": type keys are lower-case words such as "story"')
                 if spec is None:
                     continue
-                if not check_keys(spec, ('name', 'template', 'urgency'), f'tickets.types.{key}'):
+                if not check_keys(spec, ('name', 'labels', 'template', 'urgency'), f'tickets.types.{key}'):
                     continue
                 if 'name' in spec and not (isinstance(spec['name'], str) and spec['name'].strip()):
                     err(f'"tickets.types.{key}.name" must be the tracker\'s issue type name')
+                labels = spec.get('labels', [])
+                if not isinstance(labels, list) or not all(isinstance(v, str) and v.strip() for v in labels):
+                    err(f'"tickets.types.{key}.labels" must be a list of issue label names')
                 if 'template' in spec:
                     check_file(spec['template'], f'tickets.types.{key}.template')
                 if 'urgency' in spec and not isinstance(spec['urgency'], bool):
@@ -308,7 +311,8 @@ def load(name, folder, remote=None):
         if missing:
             raise ProfileError(f'{name}: ticket type "{key}" needs {missing} (it is not one of Default\'s types)')
     tickets['types'] = {
-        key: dict(spec, template=path(spec['template'])) for key, spec in tickets.get('types', {}).items()
+        key: {'labels': [], **spec, 'template': path(spec['template'])}
+        for key, spec in tickets.get('types', {}).items()
     }
     for key in ('fields', 'urgency'):
         tickets[key] = path(tickets.get(key))

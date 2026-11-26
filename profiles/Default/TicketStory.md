@@ -14,7 +14,7 @@ Sections in this order, each header a bold paragraph (`h` block). `Block` lists 
 ## Rules
 
 - Sections 1–5 are plain language; no code names, file paths or jargon.
-- **Potentially impacted files** lists one `path/from/repo/root` per item in backticks and nothing else — no functions, line numbers or proposed changes. If the code wasn't read, the single line `Codebase not yet investigated.` If other tickets overlap this work, end with `Overlaps with KEY-123, KEY-456.`
+- **Potentially impacted files** lists one `path/from/repo/root` per item in backticks and nothing else — no functions, line numbers or proposed changes. If the code wasn't read, the single line `Codebase not yet investigated.` If other tickets overlap this work, end with `Overlaps with #12, #34.` (on Jira: `Overlaps with ABC-123, ABC-456.`)
 
 ## Spec skeleton
 
@@ -28,7 +28,7 @@ Sections in this order, each header a bold paragraph (`h` block). `Block` lists 
     {"h": "Acceptance criteria"}, {"ul": ["...", "Existing behavior ... is unchanged."]},
     {"h": "Out of scope"},
     {"h": "How to verify"}, {"ul": ["Do X. Expect Y."]},
-    {"h": "Potentially impacted files"}, {"ul": ["`src/example/module.py`"]}, {"p": "Overlaps with KEY-123."}
+    {"h": "Potentially impacted files"}, {"ul": ["`src/example/module.py`"]}
   ]
 }
 ```

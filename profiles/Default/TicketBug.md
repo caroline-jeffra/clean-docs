@@ -14,7 +14,7 @@ Sections in this order, each header a bold paragraph (`h` block). `Block` lists 
 ## Rules
 
 - Sections 1–5 are terse and readable by someone outside the team: no code names, stack traces or jargon.
-- **Potentially impacted files** lists one `path/from/repo/root` per item in backticks and nothing else — no functions, line numbers or proposed changes. If the code wasn't read, the single line `Codebase not yet investigated.` If other tickets overlap this work, end with `Overlaps with KEY-123, KEY-456.`
+- **Potentially impacted files** lists one `path/from/repo/root` per item in backticks and nothing else — no functions, line numbers or proposed changes. If the code wasn't read, the single line `Codebase not yet investigated.` If other tickets overlap this work, end with `Overlaps with #12, #34.` (on Jira: `Overlaps with ABC-123, ABC-456.`)
 
 ## Spec skeleton
 
