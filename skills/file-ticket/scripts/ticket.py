@@ -12,8 +12,11 @@ levels. Trackers:
                   ### headings) and OUT_DIR/issue.json ({"title", "labels", "update"}).
                   Labels come from the type's "labels". References are #12 or
                   group/repo#12, left for the forge to link. --update takes the issue
-                  number. --project, --projects and "fields" are Jira-only.
-  jira            A Jira work item. --project is required; --update takes a key in it.
+                  number. issue.json's "repo" is the profile's tracker.repo, the repo the
+                  issue goes to, or null for the current repo's origin. --project,
+                  --projects and "fields" are Jira-only.
+  jira            A Jira work item. --project defaults to the profile's tracker.project
+                  and is required without one; --update takes a key in it.
                   Writes OUT_DIR/description.md (Markdown for the Atlassian MCP's
                   createJiraIssue and editJiraIssue), and for the acli fallback
                   OUT_DIR/workitem.json (for `acli jira workitem create --from-json`,
@@ -473,8 +476,21 @@ def main():
         sys.exit(f"--type must be one of the profile's types: {sorted(types)}")
     template = template_for(profile, args.type)
 
+    resolved = profile['resolved']
+    shown = f'{resolved["name"]}/{resolved["override"]}' if resolved.get('override') else resolved['name']
+    note = None
     if kind == 'jira':
-        if not (args.project and re.fullmatch(PROJECT_KEY, args.project)):
+        default = profile['tracker'].get('project')
+        if args.project:
+            destination = f'project {args.project} (from --project)'
+            if default and default != args.project:
+                note = f"note: --project {args.project} replaces the profile's project {default}"
+        elif default:
+            args.project = default
+            destination = f'project {default} (from profile {shown})'
+        else:
+            sys.exit('--project is needed: this profile sets no "tracker.project"')
+        if not re.fullmatch(PROJECT_KEY, args.project):
             sys.exit('--project must be a Jira project key such as ABC')
         extra = [k.strip().upper() for k in args.projects.split(',') if k.strip()]
         bad = [k for k in extra if not re.fullmatch(PROJECT_KEY, k)]
@@ -495,6 +511,11 @@ def main():
                 sys.exit('--update takes an issue number such as 12 or #12')
             update = int(m.group(1))
         tracker = forge(kind)
+        repo = profile['tracker'].get('repo')
+        destination = f'{repo} (from profile {shown})' if repo else "this repo's origin"
+        origin = (resolved.get('remote') or '').partition('/')[2]
+        if repo and repo.lower() != origin.lower():
+            note = f'note: the issue goes to {repo}, not ' + (f'this repo ({origin})' if origin else 'this repo')
 
     summary, blocks, fields = read_spec(args.spec, profile['tickets']['max_summary'])
     check_fields(fields)
@@ -503,9 +524,10 @@ def main():
     check(blocks, template, tracker, update is not None)
 
     prepare(args.out_dir)
-    resolved = profile['resolved']
-    shown = f'{resolved["name"]}/{resolved["override"]}' if resolved.get('override') else resolved['name']
     print(f'profile: {shown} ({resolved["from"]}), tracker: {kind}')
+    print(f'destination: {destination}')
+    if note:
+        print(note)
     for warning in resolved.get('warnings', []):
         print(f'warning: {warning}')
     if kind == 'jira':
@@ -532,7 +554,7 @@ def main():
         labels = types[args.type]['labels']
         write(args.out_dir, 'title.txt', summary)
         write(args.out_dir, 'body.md', markdown(blocks, tracker))
-        write(args.out_dir, 'issue.json', {'title': summary, 'labels': labels, 'update': update})
+        write(args.out_dir, 'issue.json', {'title': summary, 'labels': labels, 'update': update, 'repo': repo})
         print(f'references: {references(blocks, tracker)}')
         print(f'labels: {json.dumps(labels)}')
 

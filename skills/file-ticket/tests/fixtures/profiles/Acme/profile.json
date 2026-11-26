@@ -1,9 +1,37 @@
 {
   "schema": 1,
-  "match": {"remotes": ["example.com/acme/*"]},
-  "tracker": {"kind": "jira", "site": "https://example.atlassian.net", "link_projects": ["PROJ"]},
+  "match": {
+    "remotes": [
+      "example.com/acme/*"
+    ]
+  },
+  "tracker": {
+    "kind": "jira",
+    "site": "https://example.atlassian.net",
+    "link_projects": [
+      "PROJ"
+    ]
+  },
   "tickets": {
-    "types": {"research": {"name": "Spike", "template": "TicketResearch.md", "urgency": false}},
+    "types": {
+      "research": {
+        "name": "Spike",
+        "template": "TicketResearch.md",
+        "urgency": false
+      }
+    },
     "max_summary": 74
+  },
+  "overrides": {
+    "Ops": {
+      "match": {
+        "repos": [
+          "ops-service"
+        ]
+      },
+      "tracker": {
+        "project": "OPS"
+      }
+    }
   }
 }

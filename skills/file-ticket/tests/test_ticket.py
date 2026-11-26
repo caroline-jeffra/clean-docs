@@ -298,8 +298,11 @@ class Markdown(unittest.TestCase):
 
 
 class Cli(unittest.TestCase):
-    def run_cli(self, spec, *args, profile='Acme'):
+    def run_cli(self, spec, *args, profile='Acme', remote=None):
         with tempfile.TemporaryDirectory() as out:
+            if remote:
+                subprocess.run(['git', 'init', '-q', out], check=True)
+                subprocess.run(['git', '-C', out, 'remote', 'add', 'origin', remote], check=True)
             path = os.path.join(out, 'spec.json')
             with open(path, 'w', encoding='utf-8') as f:
                 json.dump(spec, f)
@@ -411,7 +414,8 @@ class Cli(unittest.TestCase):
         proc, out = self.run_cli({'summary': 'A summary', 'blocks': blocks}, '--type', 'task', profile='Hub')
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(out['title.txt'], 'A summary')
-        self.assertEqual(out['issue.json'], {'title': 'A summary', 'labels': [], 'update': None})
+        self.assertEqual(out['issue.json'], {'title': 'A summary', 'labels': [], 'update': None, 'repo': None})
+        self.assertIn("destination: this repo's origin", proc.stdout)
         self.assertIn('### What needs to be done', out['body.md'])
         self.assertIn('Overlaps with #4, acme/other#5.', out['body.md'])
         self.assertIn('tracker: github', proc.stdout)
@@ -436,6 +440,56 @@ class Cli(unittest.TestCase):
                 self.assertEqual(out['issue.json']['update'], 12)
         proc, _ = self.run_cli({'summary': 's', 'blocks': blocks}, '--type', 'task', '--update', 'ABC-1', profile='Hub')
         self.assertNotEqual(proc.returncode, 0)
+
+    def test_jira_project_defaults_to_the_profiles(self):
+        spec = {'summary': 's', 'blocks': task(*VALID_TASK)}
+        proc, out = self.run_cli(spec, '--type', 'task', profile='Acme/Ops')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(out['workitem.json']['projectKey'], 'OPS')
+        self.assertIn('profile: Acme/Ops (forced)', proc.stdout)
+        self.assertIn('destination: project OPS (from profile Acme/Ops)', proc.stdout)
+
+    def test_explicit_project_wins_and_the_difference_is_said(self):
+        spec = {'summary': 's', 'blocks': task(*VALID_TASK)}
+        proc, out = self.run_cli(spec, '--type', 'task', '--project', 'PROJ', profile='Acme/Ops')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(out['workitem.json']['projectKey'], 'PROJ')
+        self.assertIn('destination: project PROJ (from --project)', proc.stdout)
+        self.assertIn("note: --project PROJ replaces the profile's project OPS", proc.stdout)
+        proc, _ = self.run_cli(spec, '--type', 'task', '--project', 'PROJ')
+        self.assertIn('destination: project PROJ (from --project)', proc.stdout)
+        self.assertNotIn('note:', proc.stdout)
+
+    def test_jira_without_any_project_says_how_to_set_one(self):
+        proc, out = self.run_cli({'summary': 's', 'blocks': task(*VALID_TASK)}, '--type', 'task')
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('tracker.project', proc.stderr)
+
+    def test_jira_update_key_must_be_in_the_profiles_project(self):
+        blocks = task(*VALID_TASK)
+        blocks[0] = {'p': ticket.UPDATED + ticket.URGENCY_SUFFIX + 'Nice to have'}
+        spec = {'summary': 's', 'blocks': blocks}
+        proc, out = self.run_cli(spec, '--type', 'task', '--update', 'OPS-7', profile='Acme/Ops')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(out['workitem.json']['issues'], ['OPS-7'])
+        proc, _ = self.run_cli(spec, '--type', 'task', '--update', 'PROJ-7', profile='Acme/Ops')
+        self.assertNotEqual(proc.returncode, 0)
+
+    def test_forge_repo_from_the_profile_is_the_destination(self):
+        blocks = files({'ul': ['`src/a.py`']}, {'p': 'Overlaps with #4.'})
+        proc, out = self.run_cli({'summary': 'A summary', 'blocks': blocks}, '--type', 'task', profile='Hub/Issues')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(out['issue.json']['repo'], 'acme/issues')
+        self.assertIn('destination: acme/issues (from profile Hub/Issues)', proc.stdout)
+        self.assertIn('note: the issue goes to acme/issues, not this repo', proc.stdout)
+        for remote, differs in (('git@github.com:acme/widget.git', True), ('git@github.com:Acme/Issues.git', False)):
+            with self.subTest(remote):
+                proc, _ = self.run_cli(
+                    {'summary': 'A summary', 'blocks': blocks}, '--type', 'task', profile='Hub/Issues', remote=remote
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual('this repo (acme/widget)' in proc.stdout, differs)
+                self.assertEqual('note:' in proc.stdout, differs)
 
     def test_github_refuses_jira_only_options(self):
         spec = {'summary': 's', 'blocks': task(*VALID_TASK)}
