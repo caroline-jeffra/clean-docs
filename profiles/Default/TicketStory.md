@@ -6,7 +6,7 @@ Sections in this order, each header a bold paragraph (`h` block). `Block` lists 
 |---|--------|-------|----------|---------|
 | 1 | Goal | p | yes | One or two plain-language sentences on the outcome |
 | 2 | Why | p/ul | yes | The problem in user or business terms, and the evidence for it |
-| 3 | Acceptance criteria | ul | yes | Observable behaviour someone outside the team can check; add "existing behaviour X is unchanged" wherever there's regression risk |
+| 3 | Acceptance criteria | ul | yes | Observable behavior someone outside the team can check; add "existing behavior X is unchanged" wherever there's regression risk |
 | 4 | Out of scope | ul | no | Related work this story deliberately leaves out |
 | 5 | How to verify | ul | yes | A concrete step and its expected result |
 | 6 | Potentially impacted files | files | yes | Paths only — see the rules |
@@ -25,7 +25,7 @@ Sections in this order, each header a bold paragraph (`h` block). `Block` lists 
     {"p": "This is a generated ticket description. Assessed ticket urgency: Nice to have"},
     {"h": "Goal"}, {"p": "..."},
     {"h": "Why"}, {"ul": ["...", "..."]},
-    {"h": "Acceptance criteria"}, {"ul": ["...", "Existing behaviour ... is unchanged."]},
+    {"h": "Acceptance criteria"}, {"ul": ["...", "Existing behavior ... is unchanged."]},
     {"h": "Out of scope"},
     {"h": "How to verify"}, {"ul": ["Do X. Expect Y."]},
     {"h": "Potentially impacted files"}, {"ul": ["`src/example/module.py`"]}, {"p": "Overlaps with KEY-123."}

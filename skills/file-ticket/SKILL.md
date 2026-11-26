@@ -21,7 +21,7 @@ Run `python3 -B <plugin>/scripts/house_style.py resolve` from the repo (add `--p
 - `tracker.kind` isn't `jira` → say that this repo's profile (`resolved.name`) doesn't file Jira tickets, and stop; offer `--profile` if the user meant another one.
 - `"from": "default"` → say in one line that no profile matched and the Default style applies; `init-profile` sets one up.
 
-Keep from it: `tracker.site` (its hostname is also the Atlassian MCP's `cloudId`), `tickets.types` (each type's `name` and `template` path), `tickets.fields`, `tickets.urgency` and `tickets.max_summary`.
+Keep from it: `tracker.site` (its hostname is also the Atlassian MCP's `cloudId`), `tickets.types` (each type's `name` and `template` path), `tickets.fields` (a fields guide, or absent), `tickets.urgency` and `tickets.max_summary`.
 
 Done when: one profile is loaded with a `jira` tracker, and you hold its template paths.
 
@@ -43,11 +43,11 @@ Done when: one project key is chosen, either set by the user or backed by eviden
 
 Read the type's template (its path from Step 0). For each section in its table, find what backs it: something the user said, or something you read in this session. For a `files` section, read the code first and list only files you opened and judged likely to be impacted by, or contributing to, what the ticket addresses — paths, never a proposed fix, so the next person forms their own approach. If you can't read the code (none is available in this session, or you can't find it), that section is the single line `Codebase not yet investigated.`
 
-Then, once the project is known, choose field values with the profile's fields file (`tickets.fields`). This needs the Atlassian MCP; without it, skip the fields. Never ask the user to pick them here — suggestions are shown for approval in Step 6.
+**Fields** are set only when the profile names a fields guide (`tickets.fields`) — the Default profile names none, so no fields are suggested. With a guide, once the project is known, choose values the way it says. This needs the Atlassian MCP; without it, skip the fields. Never ask the user to pick them here — suggestions are shown for approval in Step 6.
 
 Ask everything still open — project, missing section facts, urgency questions from the rubric — in **one** message, before drafting. **Never ask for videos or screenshots**; include them only if the user already gave them. A section the user answers "unknown" to gets the text `Unknown — to be confirmed`.
 
-Done when: every required section is backed by the user's words, something you read, or `Unknown — to be confirmed`, every file you plan to list is one you opened, and each field is chosen with the evidence behind it, or left blank.
+Done when: every required section is backed by the user's words, something you read, or `Unknown — to be confirmed`, every file you plan to list is one you opened, and — with a fields guide — each field is chosen with the evidence behind it, or left blank.
 
 ## Step 4 — Assess urgency
 
@@ -84,7 +84,7 @@ Show the user, as readable text (bold headers, real lists — not the JSON spec)
 - the ticket keys that will be linked as Relates (`adf.py` prints them);
 - for a type with urgency, one line outside the ticket naming the rubric line behind the level;
 - in update mode, the Changes list from [`reference/update.md`](reference/update.md);
-- outside the ticket, the suggested fields with their evidence — `Components → Billing (as on ABC-120 and 2 similar)` — and any field that exists but is left blank, saying so.
+- with a fields guide, outside the ticket, the suggested fields with their evidence — `<Field> → <value> (as on ABC-120 and 2 similar)` — and any field that exists but is left blank, saying so.
 
 After every edit the user asks for, rebuild with `adf.py` before showing the draft again.
 

@@ -4,7 +4,7 @@ Sections in this order, each header a bold paragraph (`h` block). `Block` lists 
 
 | # | Header | Block | Required | Content |
 |---|--------|-------|----------|---------|
-| 1 | Expected | p | yes | One sentence on the correct behaviour |
+| 1 | Expected | p | yes | One sentence on the correct behavior |
 | 2 | Actual | p | yes | What happened instead, with when and how often if known |
 | 3 | Steps to reproduce | ol | yes | Numbered steps anyone can follow, ending on the step where it goes wrong |
 | 4 | Evidence | ul | no | A link or file name per screenshot, recording or log the user already gave — never ask for them |

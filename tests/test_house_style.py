@@ -179,7 +179,7 @@ class Validate(unittest.TestCase):
     def test_rejections(self):
         cases = {
             'schema': {'schema': 2},
-            'unknown key': {'colour': 'red'},
+            'unknown key': {'color': 'red'},
             'unknown nested key': {'tracker': {'kind': 'jira', 'token': 'x'}},
             'bad kind': {'tracker': {'kind': 'trello'}},
             'insecure site': {'tracker': {'site': 'http://example.com'}},

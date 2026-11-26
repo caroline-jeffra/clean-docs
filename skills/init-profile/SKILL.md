@@ -15,7 +15,7 @@ Create or change one house-style profile: a PascalCase folder holding `profile.j
 
 Read `$CLEAN_DOCS_PROFILES`, else `profiles_dir` in `~/.config/clean-docs/config.json` (under `$XDG_CONFIG_HOME` if set).
 
-If neither is set, ask where profiles should live. Suggest a private, versioned place — a notes vault the user already keeps (if `dev-workbook context` prints a `vault=`, suggest `<vault>/HouseStyles`), or a private dotfiles repo. **Not inside this plugin**, and not a public repo: profiles hold the organisation's tracker site and conventions. Once approved, write `{"profiles_dir": "<absolute path>"}` to the config file, creating its folder.
+If neither is set, ask where profiles should live. Suggest a private, versioned place — a notes vault the user already keeps (if `dev-workbook context` prints a `vault=`, suggest `<vault>/HouseStyles`), or a private dotfiles repo. **Not inside this plugin**, and not a public repo: profiles hold the organization's tracker site and conventions. Once approved, write `{"profiles_dir": "<absolute path>"}` to the config file, creating its folder.
 
 Done when: the profiles directory is known and configured.
 
@@ -24,10 +24,11 @@ Done when: the profiles directory is known and configured.
 Ask in **one** message, proposing an answer to each from what you can see:
 
 - **Name** — PascalCase (`Acme`, `Personal`). If it exists, this is an edit: read the current files first.
-- **Which repos** — remote globs (`gitlab.example.com/team/*`, from `git remote get-url origin` in the current repo, normalised to host/path) and/or repo folder names. Run `house_style.py resolve` in the current repo to show what matches today.
+- **Which repos** — remote globs (`gitlab.example.com/team/*`, from `git remote get-url origin` in the current repo, normalized to host/path) and/or repo folder names. Run `house_style.py resolve` in the current repo to show what matches today.
 - **Tracker** — `jira` (with its `https://` site and any projects always linked), `github`, `gitlab`, `auto` (from the remote), or `none`.
 - **Request template** — Default's, a template of their own, or another installed skill (`skill:<plugin>:<skill>`, e.g. one that writes PR bodies).
 - **Ship update** — the comment template (Default's, their own, or none) and a Jira status transition name, or none.
+- **Ticket fields** — none (the Default), or a fields guide of their own: which optional Jira fields to suggest (components, single-select custom fields) and how to choose values. Field IDs are site-specific, so the guide says how to look them up rather than hard-coding them where it can.
 - **Ticket types** — keep, remove (`null`) or add types; each added type needs the tracker's issue type `name`, a `template`, and whether it has `urgency`.
 - **Source material** — files to import (old templates, a style guide, a config such as `{"site": …, "projects": […]}`), if any.
 

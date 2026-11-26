@@ -6,7 +6,7 @@ How the skills in this plugin are written, so each one is predictable to invoke 
 
 - One directory per skill: `skills/<name>/SKILL.md`, with long reference material in a sibling `reference/<topic>.md` — only when a step branches or the top would otherwise bloat.
 - **Shared by every skill:** [`scripts/house_style.py`](scripts/house_style.py) (profile resolution) and [`profiles/Default`](profiles/Default) (the style used when nothing else matches). Skills reach them at `<skill-dir>/../..`; nothing else is shared between skills.
-- **No organisation's data lives here.** Sites, project keys, field IDs, product names and house templates belong in a user's profile, outside the repo. Examples use `example.com`, `example.atlassian.net`, `ABC`/`PROJ` keys and generic paths.
+- **No organization's data lives here.** Sites, project keys, field IDs, product names and house templates belong in a user's profile, outside the repo. Examples use `example.com`, `example.atlassian.net`, `ABC`/`PROJ` keys and generic paths.
 
 ## Frontmatter
 

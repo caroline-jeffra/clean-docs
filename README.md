@@ -6,7 +6,7 @@ Claude Code skills for developer documentation in a **house style you choose per
 
 | Skill | Invoke | What it does |
 |-------|--------|--------------|
-| **file-ticket** | `/file-ticket` | Drafts a Jira ticket in the profile's template for its type, with an assessed urgency from the profile's rubric and suggested fields. Shows the draft for approval, then creates it via the Atlassian MCP (`acli` as fallback), links related tickets and reads the description back. Can also restructure an existing ticket without losing what it says. |
+| **file-ticket** | `/file-ticket` | Drafts a Jira ticket in the profile's template for its type, with an assessed urgency from the profile's rubric, and suggested Jira fields when the profile has a fields guide. Shows the draft for approval, then creates it via the Atlassian MCP (`acli` as fallback), links related tickets and reads the description back. Can also restructure an existing ticket without losing what it says. |
 | **init-profile** | `/init-profile` | Sets up or edits a profile: where profiles live, which repos it applies to, its tracker, and the templates it overrides — from the Default profile or from templates you import. |
 | **update-ticket** | `/update-ticket` | Drafts the ship-time comment for a ticket (Jira, GitHub or GitLab issues) and, on Jira, the profile's status transition; posts only the exact draft you approved. |
 | **write-request** | `/write-request` | Writes the MR/PR title and description for the current branch in the profile's template — from the commits, diff, an optional spec and the ticket. Writes two files; never pushes or opens anything. A profile can delegate this to another installed skill. |
@@ -38,7 +38,7 @@ A profile is a folder named in PascalCase with a `profile.json` and only the tem
 }
 ```
 
-- **Where profiles live:** `$CLEAN_DOCS_PROFILES`, else `profiles_dir` in `~/.config/clean-docs/config.json`. Keep them somewhere private and versioned — they hold your organisation's tracker and conventions, which is why none ship here.
+- **Where profiles live:** `$CLEAN_DOCS_PROFILES`, else `profiles_dir` in `~/.config/clean-docs/config.json`. Keep them somewhere private and versioned — they hold your organization's tracker and conventions, which is why none ship here.
 - **Which profile applies:** a `repos` entry naming the repo folder wins; otherwise the `remotes` glob with the most literal characters; a tie asks you; no match uses Default.
 - **Overlaying:** objects merge key by key, other values replace, `null` removes (`"types": {"task": null}`).
 - **`request.template`** may be `skill:<plugin>:<skill>` to hand MR/PR bodies to another installed skill.

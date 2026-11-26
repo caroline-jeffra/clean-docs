@@ -9,7 +9,6 @@
       "bug": {"name": "Bug", "template": "TicketBug.md", "urgency": true},
       "task": {"name": "Task", "template": "TicketTask.md", "urgency": true}
     },
-    "fields": "TicketFields.md",
     "urgency": "Urgency.md",
     "max_summary": 80
   },

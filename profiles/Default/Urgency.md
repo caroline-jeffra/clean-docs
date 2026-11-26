@@ -5,7 +5,7 @@ Check the levels in order and **stop at the first match**. Each level is a `## N
 ## 1. Critical — security or data at risk
 
 - Secrets, credentials or personal data are exposed, or could be.
-- Authentication or authorisation can be bypassed.
+- Authentication or authorization can be bypassed.
 - A known vulnerability is reachable in production.
 - Credentials that leaked still need rotating.
 
