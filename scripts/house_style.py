@@ -41,6 +41,7 @@ Remotes are compared as host/path without scheme, credentials, port or ".git":
 """
 
 import argparse
+import collections
 import fnmatch
 import json
 import os
@@ -59,6 +60,7 @@ TYPE_KEY = re.compile(r'[a-z][a-z0-9-]*')
 SITE = re.compile(r'https://[A-Za-z0-9.-]+(?::\d{1,5})?(?:/[A-Za-z0-9._~-]+)*/?')
 LABEL = re.compile(r'[^\x00-\x1f\x7f"`$\\]+')
 FORGE_REPO = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)+')
+CATCH_ALL_PROBES = ('probe.invalid/probe/probe', 'q.q/q/q')  # an override glob matching these matches nearly anything
 TRACKERS = ('auto', 'jira', 'github', 'gitlab', 'none')
 NULLABLE = (
     'tickets.types.*',
@@ -179,6 +181,10 @@ def repo_facts(repo, warnings):
     return remote, name
 
 
+def is_catch_all(glob):
+    return any(fnmatch.fnmatchcase(probe, glob.lower()) for probe in CATCH_ALL_PROBES)
+
+
 def literal_length(pattern):
     return len(re.sub(r'[*?\[\]]', '', pattern))
 
@@ -204,7 +210,7 @@ def overrides_of(data):
     overrides = data.get('overrides')
     if not isinstance(overrides, dict):
         return {}
-    return {name: layer for name, layer in overrides.items() if isinstance(layer, dict)}
+    return {name: layer for name, layer in overrides.items() if NAME.fullmatch(name) and isinstance(layer, dict)}
 
 
 def profile_score(data, remote, repo_name):
@@ -230,7 +236,7 @@ def choose_override(profile, data, remote, repo_name):
     return tied[0], 'repos' if best == float('inf') else 'remote', []
 
 
-def choose(profiles, remote, repo_name, warnings):
+def choose(profiles, remote, repo_name, warnings, cache=None):
     """(name or None, how, tied) — how is repos | remote | default | ambiguous; ambiguous also returns the tied names.
 
     A profile whose profile.json can't be read is skipped with a warning, so one broken profile
@@ -243,6 +249,8 @@ def choose(profiles, remote, repo_name, warnings):
         except ProfileError as e:
             warnings.append(f'skipped profile {name}: {e}')
             continue
+        if cache is not None:
+            cache[name] = data
         score = profile_score(data, remote, repo_name)
         if score is not None:
             scored.append((score, name))
@@ -258,11 +266,35 @@ def choose(profiles, remote, repo_name, warnings):
 # ---------------------------------------------------------------- loading
 
 
+def forge_repo_ok(value):
+    """owner/repo or group/sub/repo — never host/owner/repo, which gh and glab would read as another host."""
+    if not (isinstance(value, str) and FORGE_REPO.fullmatch(value)):
+        return False
+    parts = value.split('/')
+    if len(parts) > 2 and '.' in parts[0]:
+        return False
+    return not any(part.lower().endswith('.git') for part in parts)
+
+
+def no_duplicate_keys(pairs):
+    counts = collections.Counter(k for k, _ in pairs)
+    dupes = sorted(k for k, n in counts.items() if n > 1)
+    if dupes:
+        raise ValueError(f'duplicate keys {dupes}; only the last of each would count')
+    return dict(pairs)
+
+
+def inside(path, root):
+    """True when path, symlinks resolved, is root or below it."""
+    real, base = (os.path.normcase(os.path.realpath(p)) for p in (path, root))
+    return os.path.commonpath([real, base]) == base
+
+
 def read_json(folder):
     path = os.path.join(folder, 'profile.json')
     try:
         with open(path, encoding='utf-8-sig') as f:
-            data = json.load(f)
+            data = json.load(f, object_pairs_hook=no_duplicate_keys)
     except (OSError, ValueError) as e:
         raise ProfileError(f'{path}: {e}') from e
     if not isinstance(data, dict):
@@ -296,7 +328,7 @@ def null_paths(obj, prefix=''):
 def validate(data, where, folder):
     """Return a list of errors for one profile.json (raw, before merging), its overrides included."""
     errors = validate_layer(data, where, folder, override=False)
-    if 'overrides' not in data or not isinstance(data, dict):
+    if not isinstance(data, dict) or 'overrides' not in data:
         return errors
     overrides = data['overrides']
     if not isinstance(overrides, dict):
@@ -316,6 +348,8 @@ def validate(data, where, folder):
 
 def validate_layer(data, where, folder, override):
     """Errors for one layer: the profile itself, or one of its overrides."""
+    if not isinstance(data, dict):
+        return [f'{where}: must be a JSON object']
     errors = []
 
     def err(msg):
@@ -335,6 +369,8 @@ def validate_layer(data, where, folder, override):
             return
         if not isinstance(value, str) or not FILE.fullmatch(value):
             err(f'"{label}" must be a template file name such as Template.md, in the profile folder')
+        elif os.path.lexists(os.path.join(folder, value)) and not inside(os.path.join(folder, value), folder):
+            err(f'"{label}": {value} links outside the profile folder; templates must live in it')
         elif not (os.path.isfile(os.path.join(folder, value)) or os.path.isfile(os.path.join(DEFAULT_DIR, value))):
             err(f'"{label}": {value} is in neither this profile nor Default')
 
@@ -362,6 +398,9 @@ def validate_layer(data, where, folder, override):
                 err(f'"match.{key}" must be a list of non-empty strings')
         if override and 'match' in data and not any(match.get(k) for k in ('remotes', 'repos')):
             err('"match" needs at least one entry in "repos" or "remotes"')
+        globs = match.get('remotes', [])
+        if override and isinstance(globs, list) and any(is_catch_all(g) for g in globs if isinstance(g, str)):
+            err('"match.remotes" can\'t hold a glob that matches every repo; an override is for some repos only')
 
     tracker = data.get('tracker', {})
     if check_keys(tracker, ('kind', 'site', 'link_projects', 'project', 'repo'), 'tracker'):
@@ -369,12 +408,11 @@ def validate_layer(data, where, folder, override):
             isinstance(tracker['project'], str) and PROJECT_KEY.fullmatch(tracker['project'])
         ):
             err('"tracker.project" must be a Jira project key such as "ABC"')
-        if tracker.get('repo') is not None and not (
-            isinstance(tracker['repo'], str)
-            and FORGE_REPO.fullmatch(tracker['repo'])
-            and '..' not in tracker['repo'].split('/')
-        ):
-            err('"tracker.repo" must be a forge repo path such as "owner/repo" or "group/sub/repo"')
+        if tracker.get('repo') is not None and not forge_repo_ok(tracker['repo']):
+            err(
+                '"tracker.repo" must be a forge repo path such as "owner/repo" or "group/sub/repo",'
+                ' with no host and no .git'
+            )
         if 'kind' in tracker and tracker['kind'] not in TRACKERS:
             err(f'"tracker.kind" must be one of {list(TRACKERS)}')
         if 'site' in tracker and not (isinstance(tracker['site'], str) and SITE.fullmatch(tracker['site'])):
@@ -435,13 +473,18 @@ def validate_layer(data, where, folder, override):
     return errors
 
 
-def load(name, folder, remote=None, override=None):
-    """The merged, validated profile with absolute template paths: Default, then the profile, then the override."""
+def load(name, folder, remote=None, override=None, raw=None, infer=True):
+    """The merged, validated profile with absolute template paths: Default, then the profile, then the override.
+
+    raw is the profile's already-read profile.json, if any. infer=False (validate DIR, where there is no repo)
+    skips the checks that depend on the kind an "auto" tracker infers from the remote.
+    """
     default = read_json(DEFAULT_DIR)
     errors = validate(default, 'Default/profile.json', DEFAULT_DIR)
-    raw = {}
-    if folder != DEFAULT_DIR:
-        raw = read_json(folder)
+    if folder == DEFAULT_DIR:
+        raw = {}
+    else:
+        raw = read_json(folder) if raw is None else raw
         errors += validate(raw, f'{name}/profile.json', folder)
     if errors:
         raise ProfileError('\n'.join(errors))
@@ -450,34 +493,52 @@ def load(name, folder, remote=None, override=None):
         if override not in overrides_of(raw):
             raise ProfileError(f'{name} has no override named {override}; its overrides: {sorted(overrides_of(raw))}')
         layer = {k: v for k, v in raw['overrides'][override].items() if k != 'match'}
-    base = {k: v for k, v in raw.items() if k != 'overrides'}
-    merged = merge(merge(default, base), layer)
+    base = merge(default, {k: v for k, v in raw.items() if k != 'overrides'})
+    merged = merge(base, layer)
+    in_layer = f'{name}/{override}'
 
     def path(file):
         if file is None:
             return None
         own = os.path.join(folder, file)
+        if os.path.lexists(own) and not inside(own, folder):
+            raise ProfileError(f'{name}: template {file} links outside the profile folder; templates must live in it')
         return own if os.path.isfile(own) else os.path.join(DEFAULT_DIR, file)
 
     tracker = dict(merged.get('tracker', {}))
+    layer_tracker = layer.get('tracker', {})
     declared = tracker.get('kind', 'auto')
-
-    def set_by(key):
-        return f'{name}/{override}' if key in layer.get('tracker', {}) else name
-
-    if 'project' in tracker and declared != 'jira':
-        raise ProfileError(
-            f'{set_by("project")}: "tracker.project" is a Jira project key, but the tracker is {declared}'
-        )
-    if 'repo' in tracker and declared not in ('github', 'gitlab', 'auto'):
-        raise ProfileError(f'{set_by("repo")}: "tracker.repo" is a forge repo, but the tracker is {declared}')
     if declared == 'auto':
         tracker['kind'] = infer_tracker(remote)
+    kind = tracker['kind'] if infer or declared != 'auto' else None  # None: not known without a repo
+
+    base_kind = base.get('tracker', {}).get('kind', 'auto')
+
+    def blame(key):
+        """Which layer to fix: the override when it set the key, or changed the kind under it."""
+        if override and key in layer_tracker:
+            return in_layer, ''
+        if override and layer_tracker.get('kind', base_kind) != base_kind:
+            return in_layer, f'; it changes the kind, so set "tracker.{key}" to null there'
+        return name, ''
+
+    # auto never infers jira, so a project on auto is wrong whatever the remote
+    if 'project' in tracker and (declared == 'auto' or kind != 'jira'):
+        who, hint = blame('project')
+        shown = tracker['kind'] if infer or declared != 'auto' else 'auto (github, gitlab or none)'
+        raise ProfileError(f'{who}: "tracker.project" is a Jira project key, but the tracker is {shown}{hint}')
+    if 'repo' in tracker and kind is not None:
+        who, hint = blame('repo')
+        if kind not in ('github', 'gitlab'):
+            raise ProfileError(f'{who}: "tracker.repo" is a forge repo, but the tracker is {kind}{hint}')
+        if kind == 'github' and tracker['repo'].count('/') != 1:
+            raise ProfileError(f'{who}: on GitHub "tracker.repo" is owner/repo, not {tracker["repo"]}')
     if tracker['kind'] == 'jira' and not tracker.get('site'):
-        who = f'{name}/{override}' if override else name
+        who = in_layer if override else name
         raise ProfileError(f'{who}: a jira tracker needs "tracker.site"')
-    links = tracker.get('link_projects', [])
-    tracker['link_projects'] = list(dict.fromkeys([*links, tracker['project']] if 'project' in tracker else links))
+    projects = [base.get('tracker', {}).get('project'), tracker.get('project')] if tracker['kind'] == 'jira' else []
+    links = [*tracker.get('link_projects', []), *(p for p in projects if p)]
+    tracker['link_projects'] = list(dict.fromkeys(links))
 
     request = dict(merged.get('request', {}))
     if not str(request.get('template', '')).startswith('skill:'):
@@ -486,7 +547,8 @@ def load(name, folder, remote=None, override=None):
     for key, spec in tickets.get('types', {}).items():
         missing = [k for k in ('name', 'template') if k not in spec]
         if missing:
-            raise ProfileError(f'{name}: ticket type "{key}" needs {missing} (it is not one of Default\'s types)')
+            who = in_layer if override and key in layer.get('tickets', {}).get('types', {}) else name
+            raise ProfileError(f'{who}: ticket type "{key}" needs {missing} (it is not one of Default\'s types)')
     tickets['types'] = {
         key: {'labels': [], **spec, 'template': path(spec['template'])}
         for key, spec in tickets.get('types', {}).items()
@@ -514,7 +576,7 @@ def resolve(repo='.', force=None, env=None):
     warnings = []
     remote, repo_name = repo_facts(repo, warnings)
     profiles = available(profiles_dir(env), warnings)
-    forced_override = None
+    forced_override, cache = None, {}
     if force and '/' in force:
         force, _, forced_override = force.partition('/')
         if not (NAME.fullmatch(force) and NAME.fullmatch(forced_override)):
@@ -529,7 +591,7 @@ def resolve(repo='.', force=None, env=None):
         else:
             raise ProfileError(f'no profile named {force}; available: {["Default", *profiles]}')
     else:
-        name, how, tied = choose(profiles, remote, repo_name, warnings)
+        name, how, tied = choose(profiles, remote, repo_name, warnings, cache)
     resolved = {
         'name': None,
         'from': how,
@@ -544,14 +606,15 @@ def resolve(repo='.', force=None, env=None):
         return {'resolved': resolved}
     name = name or 'Default'
     folder = DEFAULT_DIR if name == 'Default' else profiles[name]
+    raw = None if name == 'Default' else cache[name] if name in cache else read_json(folder)
     override, override_how = None, None
     if forced_override:
         override, override_how = forced_override, 'forced'
-    elif name != 'Default':
-        override, override_how, tied = choose_override(name, read_json(folder), remote, repo_name)
+    elif raw is not None:
+        override, override_how, override_ties = choose_override(name, raw, remote, repo_name)
         if override_how == 'ambiguous':
-            return {'resolved': dict(resolved, **{'from': 'ambiguous', 'candidates': tied})}
-    profile = load(name, folder, remote, override)
+            return {'resolved': dict(resolved, **{'from': 'ambiguous', 'candidates': override_ties})}
+    profile = load(name, folder, remote, override, raw)
     profile['resolved'] = dict(resolved, name=name, dir=folder, override=override, override_from=override_how)
     return profile
 
@@ -575,9 +638,10 @@ def main(argv=None):
             if not errors:
                 for override in (None, *overrides_of(raw)):
                     try:
-                        load(name, folder, override=override)
+                        load(name, folder, override=override, raw=raw, infer=False)
                     except ProfileError as e:
                         errors.append(str(e))
+            errors = list(dict.fromkeys(errors))
             print('\n'.join(errors) if errors else 'ok')
             return 1 if errors else 0
         profile = resolve(args.repo, args.profile)

@@ -1,5 +1,6 @@
 """Per-repo overrides inside a profile, and the tracker.project / tracker.repo fields."""
 
+import json
 import os
 import subprocess
 import sys
@@ -47,10 +48,25 @@ class ValidateOverrides(unittest.TestCase):
             'bad nested value': {'overrides': {'Gadget': {'match': ok_match, 'tracker': {'kind': 'trello'}}}},
             'null where not nullable': {'overrides': {'Gadget': {'match': ok_match, 'tickets': {'max_summary': None}}}},
             'missing template': {'overrides': {'Gadget': {'match': ok_match, 'request': {'template': 'Nope.md'}}}},
+            'null match': {'overrides': {'Gadget': {'match': None}}},
+            'match repos not a list': {'overrides': {'Gadget': {'match': {'repos': 'gadget'}}}},
+            'match repos not strings': {'overrides': {'Gadget': {'match': {'repos': [1]}}}},
+            'match not an object': {'overrides': {'Gadget': {'match': ['gadget']}}},
+            'tracker not an object': {'overrides': {'Gadget': {'match': ok_match, 'tracker': 'jira'}}},
+            'catch-all glob': {'overrides': {'Gadget': {'match': {'remotes': ['*']}}}},
+            'catch-all double glob': {'overrides': {'Gadget': {'match': {'remotes': ['**', 'gitlab.com/a/b']}}}},
+            'catch-all with slashes': {'overrides': {'Gadget': {'match': {'remotes': ['*/*']}}}},
+            'catch-all with a dot': {'overrides': {'Gadget': {'match': {'remotes': ['*.*']}}}},
         }
         for label, data in cases.items():
             with self.subTest(label):
                 self.assertTrue(self.errors(data), label)
+
+    def test_non_objects_are_messages_not_tracebacks(self):
+        for data in ([], 'x', None):
+            with self.subTest(data):
+                self.assertTrue(hs.validate(data, 'X', hs.DEFAULT_DIR))
+        self.assertTrue(self.errors({'schema': True}))
 
     def test_override_errors_name_the_override(self):
         errors = self.errors({'overrides': {'Gadget': {'match': {'repos': ['b']}, 'tracker': {'kind': 'trello'}}}})
@@ -61,6 +77,8 @@ class ValidateOverrides(unittest.TestCase):
         self.assertEqual(self.errors({'tracker': {'project': 'GDG'}}), [])
         self.assertEqual(self.errors({'tracker': {'repo': 'acme/widget'}}), [])
         self.assertEqual(self.errors({'tracker': {'repo': 'group/sub.group/my_repo-2'}}), [])
+        self.assertEqual(self.errors({'tracker': {'repo': 'my.group/proj'}}), [])
+        self.assertEqual(self.errors({'overrides': {'Web': {'match': {'remotes': ['github.com/acme/*']}}}}), [])
         self.assertEqual(self.errors({'tracker': {'project': None, 'repo': None}}), [])
         for tracker in (
             {'project': 'gadget'},
@@ -72,6 +90,11 @@ class ValidateOverrides(unittest.TestCase):
             {'repo': 'acme/widget/'},
             {'repo': 'acme/wid get'},
             {'repo': '-R/x'},
+            {'repo': 'evil.example.com/team/issues'},
+            {'repo': 'acme/widget.git'},
+            {'repo': 'acme/widget.GIT'},
+            {'repo': 'acme/foo.git/bar'},
+            {'repo': 'acme.io/platform/issues'},
         ):
             with self.subTest(tracker):
                 self.assertTrue(self.errors({'tracker': tracker}))
@@ -216,7 +239,16 @@ class ResolveOverrides(unittest.TestCase):
             self.resolve('Org/Nope')
         self.assertIn('Gadget', str(e.exception))
         self.assertIn('Web', str(e.exception))
-        for bad in ('Default/Gadget', 'Missing/Gadget', 'Org/', 'Org/Gadget/X'):
+        for bad in (
+            'Default/Gadget',
+            'Missing/Gadget',
+            'Org/',
+            'Org/Gadget/X',
+            '/Gadget',
+            '/',
+            'org/Gadget',
+            'Org/gadget',
+        ):
             with self.subTest(bad), self.assertRaises(hs.ProfileError):
                 self.resolve(bad)
 
@@ -269,6 +301,140 @@ class ResolveOverrides(unittest.TestCase):
         self.org()
         self.assertEqual(self.resolve()['resolved']['override'], 'Gadget')
 
+    def test_kind_change_in_override_blames_the_override(self):
+        self.profile(
+            'Org',
+            tracker=dict(JIRA, project='ORG'),
+            overrides={
+                'Web': {'match': {'repos': ['gadget']}, 'tracker': {'kind': 'github'}},
+            },
+        )
+        with self.assertRaises(hs.ProfileError) as e:
+            self.resolve()
+        self.assertIn('Org/Web', str(e.exception))
+        self.assertIn('null', str(e.exception))
+        self.profile(
+            'Org',
+            tracker=dict(JIRA, project='ORG'),
+            overrides={
+                'Web': {'match': {'repos': ['gadget']}, 'tracker': {'kind': 'github', 'project': None}},
+            },
+        )
+        got = self.resolve()['tracker']
+        self.assertEqual((got['kind'], got['link_projects']), ('github', []))
+
+    def test_restating_the_kind_blames_the_profile(self):
+        self.profile(
+            'Org',
+            tracker={'kind': 'github', 'project': 'XY'},
+            overrides={
+                'Web': {'match': {'repos': ['gadget']}, 'tracker': {'kind': 'github'}},
+            },
+        )
+        with self.assertRaises(hs.ProfileError) as e:
+            self.resolve()
+        self.assertTrue(str(e.exception).startswith('Org:'))
+
+    def test_repo_on_auto_needs_a_forge_remote(self):
+        subprocess.run(
+            ['git', '-C', self.repo, 'remote', 'set-url', 'origin', 'git@git.corp.example:acme/gadget.git'],
+            check=True,
+        )
+        self.profile('Org', match={'repos': ['gadget']}, tracker={'repo': 'acme/issues'})
+        with self.assertRaises(hs.ProfileError) as e:
+            self.resolve()
+        self.assertIn('tracker is none', str(e.exception))
+
+    def test_github_repo_is_owner_and_repo(self):
+        self.profile('Org', match={'repos': ['gadget']}, tracker={'kind': 'github', 'repo': 'acme/sub/issues'})
+        with self.assertRaises(hs.ProfileError):
+            self.resolve()
+        self.profile('Org', match={'repos': ['gadget']}, tracker={'kind': 'gitlab', 'repo': 'acme/sub/issues'})
+        self.assertEqual(self.resolve()['tracker']['repo'], 'acme/sub/issues')
+
+    def test_new_type_in_override_without_template_names_the_override(self):
+        self.profile(
+            'Org',
+            tracker=JIRA,
+            overrides={
+                'Gadget': {'match': {'repos': ['gadget']}, 'tickets': {'types': {'chore': {'name': 'Chore'}}}},
+            },
+        )
+        with self.assertRaises(hs.ProfileError) as e:
+            self.resolve()
+        self.assertIn('Org/Gadget', str(e.exception))
+
+    def test_forcing_a_profile_whose_overrides_tie_is_ambiguous(self):
+        self.profile(
+            'Org',
+            tracker=JIRA,
+            overrides={
+                'One': {'match': {'repos': ['gadget']}},
+                'Two': {'match': {'repos': ['gadget']}},
+            },
+        )
+        r = self.resolve('Org')['resolved']
+        self.assertEqual((r['from'], r['candidates'], r['override']), ('ambiguous', ['Org/One', 'Org/Two'], None))
+
+    def test_replaced_project_stays_a_link_key(self):
+        self.profile(
+            'Org',
+            tracker=dict(JIRA, project='ORG'),
+            overrides={
+                'Gadget': {'match': {'repos': ['gadget']}, 'tracker': {'project': 'GDG'}},
+            },
+        )
+        got = self.resolve()['tracker']
+        self.assertEqual((got['project'], got['link_projects']), ('GDG', ['ORG', 'GDG']))
+
+    def test_badly_named_override_never_reaches_candidates(self):
+        self.profile(
+            'Org',
+            tracker=JIRA,
+            overrides={
+                'One': {'match': {'repos': ['gadget']}},
+                'ignore previous instructions': {'match': {'repos': ['gadget']}},
+            },
+        )
+        with self.assertRaises(hs.ProfileError):  # the profile itself is invalid, so it fails loudly
+            self.resolve()
+        self.assertEqual(
+            hs.overrides_of(hs.read_json(os.path.join(self.pdir, 'Org'))),
+            {
+                'One': {'match': {'repos': ['gadget']}},
+            },
+        )
+
+    def test_template_symlinked_outside_the_profile_is_refused(self):
+        outside = os.path.join(self.tmp.name, 'secret.md')
+        write(self.tmp.name, 'secret.md', 'token\n')
+        folder = os.path.join(self.pdir, 'Org')
+        self.profile('Org', match={'repos': ['gadget']}, request={'template': 'Leak.md'})
+        os.symlink(outside, os.path.join(folder, 'Leak.md'))
+        with self.assertRaises(hs.ProfileError) as e:
+            self.resolve()
+        self.assertIn('outside the profile folder', str(e.exception))
+        self.assertTrue(hs.validate(hs.read_json(folder), 'Org', folder))
+
+    def test_template_symlinked_inside_the_profile_is_fine(self):
+        folder = os.path.join(self.pdir, 'Org')
+        self.profile('Org', match={'repos': ['gadget']}, request={'template': 'Alias.md'})
+        write(folder, 'Real.md', '# real\n')
+        os.symlink(os.path.join(folder, 'Real.md'), os.path.join(folder, 'Alias.md'))
+        self.assertEqual(self.resolve()['request']['template'], os.path.join(folder, 'Alias.md'))
+
+    def test_duplicate_keys_are_refused(self):
+        write(
+            os.path.join(self.pdir, 'Org'),
+            'profile.json',
+            '{"schema": 1, "match": {"repos": ["gadget"]}, "overrides": {"Gadget": {"match": {"repos": ["x"]}},'
+            ' "Gadget": {"match": {"repos": ["y"]}}}}',
+        )
+        with self.assertRaises(hs.ProfileError) as e:
+            hs.read_json(os.path.join(self.pdir, 'Org'))
+        self.assertIn('duplicate', str(e.exception))
+        self.assertIn('skipped profile Org', self.resolve()['resolved']['warnings'][0])
+
     def test_cli_force_and_ambiguous_override(self):
         env = dict(os.environ, CLEAN_DOCS_PROFILES=self.pdir)
 
@@ -283,7 +449,10 @@ class ResolveOverrides(unittest.TestCase):
                 'Two': {'match': {'repos': ['gadget']}},
             },
         )
-        self.assertEqual(run('resolve', '--repo', self.repo).returncode, hs.AMBIGUOUS)
+        tie = run('resolve', '--repo', self.repo)
+        self.assertEqual(tie.returncode, hs.AMBIGUOUS)
+        r = json.loads(tie.stdout)['resolved']
+        self.assertEqual((r['candidates'], r['override']), (['Org/One', 'Org/Two'], None))
         self.assertEqual(run('resolve', '--repo', self.repo, '--profile', 'Org/Two').returncode, 0)
 
 
@@ -313,6 +482,20 @@ class ValidateCli(unittest.TestCase):
         self.assertIn('Org/Gadget', bad.stdout)
         self.assertIn('Org/Web', bad.stdout)  # jira without a site, reported too
         self.assertNotIn('Traceback', bad.stderr)
+
+    def test_repeated_errors_are_reported_once_and_auto_repo_validates(self):
+        bad = self.run_validate(
+            {
+                'tracker': {'kind': 'github', 'project': 'XY'},
+                'overrides': {n: {'match': {'repos': [n.lower()]}} for n in ('A', 'B', 'C')},
+            }
+        )
+        self.assertEqual(len(bad.stdout.strip().splitlines()), 1)
+        ok = self.run_validate({'tracker': {'repo': 'acme/issues'}})
+        self.assertEqual((ok.returncode, ok.stdout.strip()), (0, 'ok'))
+        auto_project = self.run_validate({'tracker': {'project': 'ABC'}})
+        self.assertEqual(auto_project.returncode, 1)
+        self.assertIn('tracker.project', auto_project.stdout)
 
 
 if __name__ == '__main__':
