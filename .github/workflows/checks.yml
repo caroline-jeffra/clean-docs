@@ -1,0 +1,23 @@
+name: checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet --disable-pip-version-check ruff==0.14.0
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: python3 -B -m unittest discover -s tests
+      - run: for d in skills/*/tests; do python3 -B -m unittest discover -s "$d" || exit 1; done

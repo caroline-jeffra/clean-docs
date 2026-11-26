@@ -1,0 +1,16 @@
+{
+  "name": "clean-docs",
+  "owner": {
+    "name": "caroline-jeffra"
+  },
+  "metadata": {
+    "description": "House-style developer documentation skills driven by per-project profiles."
+  },
+  "plugins": [
+    {
+      "name": "clean-docs",
+      "source": "./",
+      "description": "House-style developer documentation: per-project profiles drive Jira tickets (file-ticket), MR/PR descriptions (write-request) and ship-time ticket updates (update-ticket); init-profile sets a profile up."
+    }
+  ]
+}
