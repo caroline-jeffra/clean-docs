@@ -10,8 +10,10 @@ permissions:
 
 jobs:
   checks:
-    runs-on: ubuntu-latest
+    # Pinned: setup-python has no Python 3.9 build for newer Ubuntu images.
+    runs-on: ubuntu-24.04
     strategy:
+      fail-fast: false
       matrix:
         python-version: ['3.9', '3.12']
     steps:
