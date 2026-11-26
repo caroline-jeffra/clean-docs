@@ -192,6 +192,37 @@ def match_score(match, remote, repo_name):
     return max(scores) if scores else None
 
 
+def overrides_of(data):
+    """{name: layer} for a profile's well-formed overrides; malformed ones are left to validate."""
+    overrides = data.get('overrides')
+    if not isinstance(overrides, dict):
+        return {}
+    return {name: layer for name, layer in overrides.items() if isinstance(layer, dict)}
+
+
+def profile_score(data, remote, repo_name):
+    """The best of a profile's own match and its overrides' matches; None when none fits."""
+    matches = [data.get('match', {})] + [layer.get('match', {}) for layer in overrides_of(data).values()]
+    scores = [s for s in (match_score(m, remote, repo_name) for m in matches) if s is not None]
+    return max(scores) if scores else None
+
+
+def choose_override(profile, data, remote, repo_name):
+    """(override or None, how, tied) inside the chosen profile — how is repos | remote | ambiguous, or None."""
+    scored = []
+    for name, layer in overrides_of(data).items():
+        score = match_score(layer.get('match', {}), remote, repo_name)
+        if score is not None:
+            scored.append((score, name))
+    if not scored:
+        return None, None, []
+    best = max(s for s, _ in scored)
+    tied = sorted(n for s, n in scored if s == best)
+    if len(tied) > 1:
+        return None, 'ambiguous', [f'{profile}/{n}' for n in tied]
+    return tied[0], 'repos' if best == float('inf') else 'remote', []
+
+
 def choose(profiles, remote, repo_name, warnings):
     """(name or None, how, tied) — how is repos | remote | default | ambiguous; ambiguous also returns the tied names.
 
@@ -205,7 +236,7 @@ def choose(profiles, remote, repo_name, warnings):
         except ProfileError as e:
             warnings.append(f'skipped profile {name}: {e}')
             continue
-        score = match_score(data.get('match', {}), remote, repo_name)
+        score = profile_score(data, remote, repo_name)
         if score is not None:
             scored.append((score, name))
     if not scored:
@@ -397,8 +428,8 @@ def validate_layer(data, where, folder, override):
     return errors
 
 
-def load(name, folder, remote=None):
-    """The merged, validated profile with absolute template paths."""
+def load(name, folder, remote=None, override=None):
+    """The merged, validated profile with absolute template paths: Default, then the profile, then the override."""
     default = read_json(DEFAULT_DIR)
     errors = validate(default, 'Default/profile.json', DEFAULT_DIR)
     raw = {}
@@ -407,7 +438,13 @@ def load(name, folder, remote=None):
         errors += validate(raw, f'{name}/profile.json', folder)
     if errors:
         raise ProfileError('\n'.join(errors))
-    merged = merge(default, raw)
+    layer = {}
+    if override is not None:
+        if override not in overrides_of(raw):
+            raise ProfileError(f'{name} has no override named {override}; its overrides: {sorted(overrides_of(raw))}')
+        layer = {k: v for k, v in raw['overrides'][override].items() if k != 'match'}
+    base = {k: v for k, v in raw.items() if k != 'overrides'}
+    merged = merge(merge(default, base), layer)
 
     def path(file):
         if file is None:
@@ -416,11 +453,23 @@ def load(name, folder, remote=None):
         return own if os.path.isfile(own) else os.path.join(DEFAULT_DIR, file)
 
     tracker = dict(merged.get('tracker', {}))
-    if tracker.get('kind', 'auto') == 'auto':
+    declared = tracker.get('kind', 'auto')
+
+    def set_by(key):
+        return f'{name}/{override}' if key in layer.get('tracker', {}) else name
+
+    if 'project' in tracker and declared != 'jira':
+        raise ProfileError(
+            f'{set_by("project")}: "tracker.project" is a Jira project key, but the tracker is {declared}'
+        )
+    if 'repo' in tracker and declared not in ('github', 'gitlab', 'auto'):
+        raise ProfileError(f'{set_by("repo")}: "tracker.repo" is a forge repo, but the tracker is {declared}')
+    if declared == 'auto':
         tracker['kind'] = infer_tracker(remote)
     if tracker['kind'] == 'jira' and not tracker.get('site'):
         raise ProfileError(f'{name}: a jira tracker needs "tracker.site"')
-    tracker.setdefault('link_projects', [])
+    links = tracker.get('link_projects', [])
+    tracker['link_projects'] = list(dict.fromkeys([*links, tracker['project']] if 'project' in tracker else links))
 
     request = dict(merged.get('request', {}))
     if not str(request.get('template', '')).startswith('skill:'):
@@ -457,6 +506,13 @@ def resolve(repo='.', force=None, env=None):
     warnings = []
     remote, repo_name = repo_facts(repo, warnings)
     profiles = available(profiles_dir(env), warnings)
+    forced_override = None
+    if force and '/' in force:
+        force, _, forced_override = force.partition('/')
+        if not (NAME.fullmatch(force) and NAME.fullmatch(forced_override)):
+            raise ProfileError(f'--profile takes Name or Name/Override, not {force}/{forced_override}')
+        if force == 'Default':
+            raise ProfileError('Default has no overrides')
     if force:
         if force == 'Default':
             name, how, tied = 'Default', 'forced', []
@@ -466,13 +522,29 @@ def resolve(repo='.', force=None, env=None):
             raise ProfileError(f'no profile named {force}; available: {["Default", *profiles]}')
     else:
         name, how, tied = choose(profiles, remote, repo_name, warnings)
-    resolved = {'name': None, 'from': how, 'dir': None, 'candidates': tied, 'remote': remote, 'warnings': warnings}
+    resolved = {
+        'name': None,
+        'from': how,
+        'override': None,
+        'override_from': None,
+        'dir': None,
+        'candidates': tied,
+        'remote': remote,
+        'warnings': warnings,
+    }
     if how == 'ambiguous':
         return {'resolved': resolved}
     name = name or 'Default'
     folder = DEFAULT_DIR if name == 'Default' else profiles[name]
-    profile = load(name, folder, remote)
-    profile['resolved'] = dict(resolved, name=name, dir=folder)
+    override, override_how = None, None
+    if forced_override:
+        override, override_how = forced_override, 'forced'
+    elif name != 'Default':
+        override, override_how, tied = choose_override(name, read_json(folder), remote, repo_name)
+        if override_how == 'ambiguous':
+            return {'resolved': dict(resolved, **{'from': 'ambiguous', 'candidates': tied})}
+    profile = load(name, folder, remote, override)
+    profile['resolved'] = dict(resolved, name=name, dir=folder, override=override, override_from=override_how)
     return profile
 
 
