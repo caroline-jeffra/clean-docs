@@ -480,5 +480,132 @@ class Cli(unittest.TestCase):
         self.assertIn('spec error', proc.stderr)
 
 
+class Hardening(unittest.TestCase):
+    """Regression tests for the review-cycle findings."""
+
+    def test_leading_slash_cannot_become_a_gitlab_quick_action(self):
+        gitlab = ticket.forge('gitlab')
+        for blocks, want in (
+            ([{'p': '/close'}], '\\/close\n'),
+            ([{'p': '  /assign me'}], '  \\/assign me\n'),
+            ([{'p': 'text\r/close'}], 'text /close\n'),
+        ):
+            with self.subTest(blocks):
+                md = ticket.markdown(blocks, gitlab)
+                self.assertEqual(md, want)
+                self.assertNotRegex(md, r'(?m)^\s*/')
+
+    def test_code_span_cannot_span_lines_or_hold_html(self):
+        for item in ('`a.py\n/close`', '`a.py\n\n<img src=//x>`', '`a.py\r/close`', '`<img src=x>`'):
+            with self.subTest(item), self.assertRaises(SystemExit):
+                build(files({'ul': [item]}), tracker=ticket.forge('gitlab'))
+
+    def test_code_fences_rejected(self):
+        for text in ('```\nlog\n```', '~~~ trace'):
+            with self.subTest(text), self.assertRaises(SystemExit):
+                build(task(('What needs to be done', [{'p': text}]), *VALID_TASK[1:]))
+
+    def test_mentions_rejected_on_forges_only(self):
+        for text in ('Ask @alice.', 'cc @org/team', '@all please'):
+            for tracker in (GITHUB, ticket.forge('gitlab')):
+                with self.subTest(text=text, tracker=tracker.kind), self.assertRaises(SystemExit):
+                    build(task(('What needs to be done', [{'p': text}]), *VALID_TASK[1:]), tracker=tracker)
+            build(task(('What needs to be done', [{'p': text}]), *VALID_TASK[1:]), tracker=JIRA)
+        for text in ('Mail ops@example.com.', 'Use `@decorator` style.'):
+            with self.subTest(text):
+                sections = [('What needs to be done', [{'p': text.replace('`@decorator` ', '')}]), *VALID_TASK[1:]]
+                build(task(*sections), tracker=GITHUB)
+
+    def test_mention_in_first_line_rejected(self):
+        blocks = task(*VALID_TASK)
+        blocks[0] = {'p': ticket.URGENCY + 'Nice to have @x'}
+        with self.assertRaises(SystemExit):
+            build(blocks, tracker=GITHUB)
+
+    def test_malformed_template_rows_fail_loudly(self):
+        for text in (
+            '| 1 | A | p | yes | x |\n| 2 | B | p | maybe | x |',
+            '| 1 | A | p | yes | x |\n| 2 | B |',
+            '| 1 | A | p, ul | yes | x |',
+        ):
+            with self.subTest(text), self.assertRaises(SystemExit):
+                ticket.parse_template(text)
+
+    def test_case_and_spacing_in_rows_are_tolerated(self):
+        got = ticket.parse_template('| 1 | A | P / UL | Yes | x |\n| 2 | B | files | NO | x |')
+        self.assertEqual(got, [ticket.Section('A', ('p', 'ul'), True), ticket.Section('B', ('files',), False)])
+
+    def test_level_headings_accept_dashes_and_fail_loudly_otherwise(self):
+        self.assertEqual(
+            ticket.parse_levels('## 1. A — x\n## 2. B – y\n## 3. C - z\n## 4. D -- w'), ('A', 'B', 'C', 'D')
+        )
+        with self.assertRaises(SystemExit):
+            ticket.parse_levels('## 1. A — x\n## 2. B: no dash')
+
+    def test_references_match_what_renders(self):
+        blocks = files({'ul': ['`src/PROJ-9.py`']}, {'p': 'Overlaps with PROJ-1.'})
+        blocks[2] = {'p': 'See\u2014PROJ-2 and PROJ-3.'}
+        self.assertEqual(ticket.references(blocks, JIRA), ['PROJ-1', 'PROJ-2', 'PROJ-3'])
+        md = ticket.markdown(blocks, JIRA)
+        for key in ('PROJ-1', 'PROJ-2', 'PROJ-3'):
+            self.assertIn(f'[{key}]({BROWSE}{key})', md)
+        self.assertIn('`src/PROJ-9.py`', md)
+
+    def test_line_breaks_collapse_the_same_in_both_outputs(self):
+        text = 'one\r\ntwo\rthree\u2028four'
+        self.assertEqual(ticket.markdown([{'p': text}], JIRA), 'one two three four\n')
+        nodes = texts(ticket.adf([{'p': text}], JIRA))
+        self.assertEqual(''.join(t for t, _ in nodes), 'one two three four')
+
+    def test_urgency_level_is_escaped_in_bold(self):
+        template = ticket.Template(TASK.sections, TASK.files, ('Do *now*',))
+        blocks = task(*VALID_TASK)
+        blocks[0] = {'p': ticket.URGENCY + 'Do *now*'}
+        ticket.check(blocks, template, JIRA)
+        self.assertTrue(ticket.markdown(blocks, JIRA).startswith(ticket.URGENCY + '**Do \\*now\\***'))
+
+
+class OutputDir(unittest.TestCase):
+    def run_cli(self, spec, out, *args, profile='Hub'):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'spec.json')
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(spec, f)
+            env = dict(os.environ, CLEAN_DOCS_PROFILES=FIXTURES, XDG_CONFIG_HOME=tmp)
+            return subprocess.run(
+                [sys.executable, '-B', SCRIPT, path, out, *args, '--profile', profile, '--repo', tmp],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+    def test_creates_the_dir_and_clears_the_other_trackers_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, 'new', 'dir')
+            spec = {'summary': 's', 'blocks': task(*VALID_TASK)}
+            jira_run = self.run_cli(spec, out, '--type', 'task', '--project', 'PROJ', profile='Acme')
+            self.assertEqual(jira_run.returncode, 0, jira_run.stderr)
+            self.assertTrue(os.path.exists(os.path.join(out, 'workitem.json')))
+            forge_run = self.run_cli(spec, out, '--type', 'task')
+            self.assertEqual(forge_run.returncode, 0, forge_run.stderr)
+            self.assertEqual(sorted(os.listdir(out)), ['body.md', 'issue.json', 'title.txt'])
+
+    def test_summary_with_any_line_break_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for summary in ('a\rb', 'a\u2028b', 'a\x00b'):
+                with self.subTest(summary=repr(summary)):
+                    proc = self.run_cli({'summary': summary, 'blocks': task(*VALID_TASK)}, tmp, '--type', 'task')
+                    self.assertNotEqual(proc.returncode, 0)
+
+    def test_jira_update_with_fields_says_they_need_edit(self):
+        blocks = task(*VALID_TASK)
+        blocks[0] = {'p': ticket.UPDATED + ticket.URGENCY_SUFFIX + 'Nice to have'}
+        spec = {'summary': 's', 'blocks': blocks, 'fields': {'components': [{'name': 'Billing'}]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self.run_cli(spec, tmp, '--type', 'task', '--project', 'PROJ', '--update', 'PROJ-9', profile='Acme')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('set them with editJiraIssue', proc.stdout)
+
+
 if __name__ == '__main__':
     unittest.main()

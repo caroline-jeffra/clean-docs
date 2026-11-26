@@ -25,8 +25,8 @@ Ask in **one** message, proposing an answer to each from what you can see:
 
 - **Name** — PascalCase (`Acme`, `Personal`). If it exists, this is an edit: read the current files first.
 - **Which repos** — remote globs (`gitlab.example.com/team/*`, from `git remote get-url origin` in the current repo, normalized to host/path) and/or repo folder names. Run `house_style.py resolve` in the current repo to show what matches today.
-- **Tracker** — `auto` (the default: the repo's own GitHub or GitLab issues, from the remote), `github` or `gitlab` explicitly, `jira` (with its `https://` site and any projects always linked), or `none`.
-- **Request template** — Default's, a template of their own, or another installed skill (`skill:<plugin>:<skill>`, e.g. one that writes PR bodies).
+- **Tracker** — `auto` (the default: the repo's own GitHub or GitLab issues, from the remote), `github` or `gitlab` explicitly (needed for a self-hosted GitHub Enterprise or a GitLab whose host doesn't contain "gitlab"), `jira` (with its `https://` site, which may include a port or path, and any projects always linked), or `none`.
+- **Request template** — Default's, a template of their own, or another installed skill (`skill:<plugin>:<skill>`, e.g. one that writes PR bodies). A skill reference hands every branch's diff, spec and ticket to that skill: name it back to the user and get an explicit yes before writing it, and only for a skill they have installed.
 - **Ship update** — the comment template (Default's, their own, or none) and a Jira status transition name, or none.
 - **Ticket fields** (Jira only) — none (the Default), or a fields guide of their own: which optional Jira fields to suggest (components, single-select custom fields) and how to choose values. Field IDs are site-specific, so the guide says how to look them up rather than hard-coding them where it can.
 - **Ticket types** — keep, remove (`null`) or add types; each added type needs a `name` (the Jira issue type, or a display name on a forge), the `labels` it gets on GitHub/GitLab, a `template`, and whether it has `urgency`. Labels must already exist in the repos; `file-ticket` never creates them.

@@ -19,7 +19,8 @@ Run `python3 -B <plugin>/scripts/house_style.py resolve` from the repo (add `--p
 
 - Exit code 3 (`"from": "ambiguous"`) → ask the user which of `candidates` to use, then run again with `--profile`.
 - `"from": "default"` → say in one line that no profile matched and the Default style applies (issues on the repo's own forge); `init-profile` sets one up.
-- `tracker.kind` is `none` → this repo has no tracker in its profile (e.g. its remote is neither GitHub nor GitLab and no profile names Jira). Say so and stop; offer `--profile` or `init-profile`.
+- `tracker.kind` is `none` → this repo has no tracker in its profile (e.g. its remote is neither github.com nor a GitLab host — a self-hosted GitHub needs `tracker.kind` set in a profile — and no profile names Jira). Say so and stop; offer `--profile` or `init-profile`.
+- Pass on every `resolved.warnings` line (a skipped broken profile, a git problem). Say in one line which profile applies and why — `resolved.name`, `resolved.from`, `resolved.remote` — since a cloned repo's own remote picks it.
 
 Keep from it: `tracker.kind` (`github`, `gitlab` or `jira`; for Jira also `tracker.site`, whose hostname is the Atlassian MCP's `cloudId`), `tickets.types` (each type's `name`, `labels` and `template` path), `tickets.fields` (Jira only; a fields guide, or absent), `tickets.urgency` and `tickets.max_summary`.
 
@@ -71,7 +72,7 @@ This is a generated ticket description. Assessed ticket urgency: {level}
 
 `{level}` is the Step 4 level, spelled as in the rubric; write it plain in the spec — the builder renders it **bold**. In update mode the line starts `This ticket description was restructured by a generator from the original.` instead. For a type without urgency, the first line is just `This is a generated ticket description.` (or the update line alone). The rest of the description follows the type's template: its table's sections in order, its rules, and its spec skeleton.
 
-**Never copy secrets, tokens, passwords, connection strings or personal data** (names, emails, IPs, customer IDs) into the ticket, even from pasted logs. Describe a leaked credential by what it is and where it was exposed, never by its value. On a forge, never write `@name` — it notifies that person.
+**Never copy secrets, tokens, passwords, connection strings or personal data** (names, emails, IPs, customer IDs) into the ticket, even from pasted logs. Describe a leaked credential by what it is and where it was exposed, never by its value. On a forge, never write `@name` — it notifies that person; the builder refuses it. The builder also refuses code blocks (```` ``` ````), and escapes a line-leading `/` so GitLab can't run it as a quick action.
 
 Write the draft as `<work-dir>/spec.json`, `{"summary": "...", "blocks": [...], "fields": {...}}` (`fields` on Jira only, when Step 3 chose any; format in [`scripts/ticket.py`](scripts/ticket.py)), then check it by building it — the build command is in the tracker's reference. The builder checks the summary, the first line, the headers and their order, the block kinds each section allows, that every required section has content, and that code spans appear only in the files section, as a plain list of paths.
 

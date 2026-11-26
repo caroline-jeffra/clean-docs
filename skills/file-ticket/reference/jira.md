@@ -32,7 +32,7 @@ Report the new key as `<site>/browse/<NEW-KEY>`.
 
 ## Fallback: acli
 
-Only when the MCP is unavailable. `acli` shows plain text literally, so it gets **ADF JSON**; **ticket text never goes on a command line** — the summary and description travel in a JSON file.
+Only when the MCP is unavailable. `acli` shows plain text literally, so it gets **ADF JSON**; **ticket text is never typed into a command** — the summary and description travel in a JSON file (`--from-json`, `--description-file`).
 
 - Create: `acli jira workitem create --from-json <work-dir>/workitem.json --json`. The same never-create-twice rule applies. Fields travel in the file as `additionalAttributes`.
 - Link: `acli jira workitem link create --out <NEW-KEY> --in <OTHER-KEY> --type Relates --yes`, using the exact Relates name from `acli jira workitem link type`.

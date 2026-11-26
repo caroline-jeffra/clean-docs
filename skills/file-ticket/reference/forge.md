@@ -4,7 +4,7 @@ How Steps 2, 5 and 7 run when the profile's `tracker.kind` is `github` (the `gh`
 
 ## Destination (Step 2)
 
-The issue goes to the current repo's `origin`. If the user names another repo, add `-R <owner/repo>` (GitLab: `-R <group/project>`) to every `gh`/`glab` call below. Confirm the destination you'll use: `gh repo view --json nameWithOwner -q .nameWithOwner`, or `glab repo view -F json` (its `path_with_namespace`).
+The issue goes to the current repo's `origin`; say which repo that is (a cloned repo's remote decides it). If the user names another repo, add `-R <owner/repo>` (GitLab: `-R <group/project>`) to every `gh`/`glab` call below. Confirm the destination you'll use: `gh repo view --json nameWithOwner -q .nameWithOwner`, or `glab repo view -F json` (its `path_with_namespace`).
 
 Ticket types become **labels**: the type's `labels` from the profile. There are no fields; `--project` and `fields` are Jira-only and the builder refuses them.
 
@@ -18,18 +18,16 @@ Add `--profile <Name>` if Step 0 needed one, and `--update <number>` in update m
 
 ## Create (Step 7.2)
 
-**Issue text never goes on a command line literally** — the title and body travel through files, so the shell can't expand backticks or `$` in them.
+**Issue text is never typed into a command.** It travels in files: `--body-file` where the CLI has one, and otherwise `"$(cat <file>)"`, which passes the file's text as one argument without the shell expanding backticks or `$` inside it. Quote every placeholder as shown — paths and label names may contain spaces.
 
-1. **Labels:** list the repo's labels (`gh label list --limit 300 --json name -q '.[].name'`, or `glab label list`). Apply only labels that exist; **never create a label** unasked — report any the profile names that the repo lacks.
+1. **Labels:** list the repo's labels (`gh label list --limit 1000 --json name -q '.[].name'`, or `glab label list`). Apply only labels that exist, matched exactly; **never create a label** unasked — report any the profile names that the repo lacks.
 2. **Create:**
-   - GitHub: `gh issue create --title "$(cat <work-dir>/title.txt)" --body-file <work-dir>/body.md`, plus `--label <name>` per existing label. It prints the issue URL.
-   - GitLab: `glab issue create --title "$(cat <work-dir>/title.txt)" --description "$(cat <work-dir>/body.md)"`, plus `--label <a,b>` for existing labels, and `--yes` so it doesn't stop to confirm. It prints the issue URL.
-
-   `"$(cat file)"` passes the file's text as one argument; the shell doesn't expand what's inside it.
+   - GitHub: `gh issue create --title "$(cat "<work-dir>/title.txt")" --body-file "<work-dir>/body.md"`, plus `--label "<name>"` per existing label. It prints the issue URL.
+   - GitLab: `glab issue create --title "$(cat "<work-dir>/title.txt")" --description "$(cat "<work-dir>/body.md")"`, plus `--label "<name>"` per existing label, and `--yes` so it doesn't stop to confirm. It prints the issue URL.
 
 ## Read back (Step 7.3)
 
-- GitHub: `gh issue view <number> --json title,body,labels`; GitLab: `glab issue view <number> -F json`.
-- The title matches `title.txt`, the body matches `body.md` (ignoring trailing whitespace), and the labels are the ones applied. If the body differs, retry **once** with `gh issue edit <number> --body-file <work-dir>/body.md` (GitLab: `glab issue update <number> --description "$(cat <work-dir>/body.md)"`) and read back again.
+- GitHub: `gh issue view "<number>" --json title,body,labels`; GitLab: `glab issue view "<number>" -F json`.
+- The title matches `title.txt`, the body matches `body.md` (ignoring trailing whitespace), and the labels are the ones applied. If the body differs, retry **once** with `gh issue edit "<number>" --body-file "<work-dir>/body.md"` (GitLab: `glab issue update "<number>" --description "$(cat "<work-dir>/body.md")"`) and read back again.
 
 Report the issue URL, any label that was skipped, and whether the read-back matched.

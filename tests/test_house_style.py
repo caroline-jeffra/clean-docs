@@ -36,6 +36,22 @@ class Remotes(unittest.TestCase):
         got = hs.normalize_remote('git@gitlab.example.com:team/sub/app.git')
         self.assertEqual(got, 'gitlab.example.com/team/sub/app')
 
+    def test_credentials_and_scheme_case_never_leak(self):
+        creds = (
+            'HTTPS://user:tok@GitHub.com/acme/widget.git',  # pragma: allowlist secret
+            'Https://tok@github.com/acme/widget',
+        )
+        for url in creds:
+            with self.subTest(url):
+                got = hs.normalize_remote(url)
+                self.assertEqual(got, 'github.com/acme/widget')
+                self.assertNotIn('tok', got)
+
+    def test_unrecognized_remote_is_none(self):
+        for url in ('', 'not a url', '/local/path/repo.git', 'file:///tmp/repo'):
+            with self.subTest(url):
+                self.assertIsNone(hs.normalize_remote(url))
+
     def test_tracker_inferred_from_host(self):
         self.assertEqual(hs.infer_tracker('github.com/a/b'), 'github')
         self.assertEqual(hs.infer_tracker('gitlab.example.com/a/b'), 'gitlab')
@@ -202,6 +218,125 @@ class Validate(unittest.TestCase):
         self.assertEqual(self.errors({'request': {'template': 'Mine.md'}}, files=['Mine.md']), [])
         self.assertEqual(self.errors({'request': {'template': 'skill:mattpocock-skills:pr'}}), [])
         self.assertEqual(self.errors({'on_ship': {'comment': None, 'transition': 'In Review'}}), [])
+
+
+class Hardening(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.pdir = os.path.join(self.tmp.name, 'profiles')
+        self.repo = os.path.join(self.tmp.name, 'Widget')
+        os.makedirs(self.pdir)
+        os.makedirs(self.repo)
+        git = ['git', '-C', self.repo]
+        subprocess.run([*git, 'init', '-q'], check=True)
+        subprocess.run([*git, 'remote', 'add', 'origin', 'git@GitHub.com:Acme/Widget.git'], check=True)
+        self.env = {'CLEAN_DOCS_PROFILES': self.pdir}
+
+    def profile(self, name, **data):
+        write(os.path.join(self.pdir, name), 'profile.json', {'schema': 1, **data})
+
+    def test_matching_ignores_case(self):
+        self.profile('Acme', match={'remotes': ['github.com/acme/*']})
+        self.assertEqual(hs.resolve(self.repo, None, self.env)['resolved']['name'], 'Acme')
+        os.remove(os.path.join(self.pdir, 'Acme', 'profile.json'))
+        self.profile('Named', match={'repos': ['widget']})
+        self.assertEqual(hs.resolve(self.repo, None, self.env)['resolved']['from'], 'repos')
+
+    def test_broken_profile_is_skipped_with_a_warning(self):
+        write(os.path.join(self.pdir, 'Broken'), 'profile.json', '{ not json')
+        self.profile('Acme', match={'remotes': ['github.com/acme/*']})
+        got = hs.resolve(self.repo, None, self.env)
+        self.assertEqual(got['resolved']['name'], 'Acme')
+        self.assertTrue(any('Broken' in w for w in got['resolved']['warnings']))
+
+    def test_user_default_folder_is_ignored_with_a_warning(self):
+        self.profile('Default', match={'repos': ['widget']})
+        got = hs.resolve(self.repo, None, self.env)
+        self.assertEqual(got['resolved']['dir'], hs.DEFAULT_DIR)
+        self.assertTrue(any('Default is the built-in profile' in w for w in got['resolved']['warnings']))
+
+    def test_missing_profiles_dir_warns(self):
+        got = hs.resolve(self.repo, None, {'CLEAN_DOCS_PROFILES': os.path.join(self.tmp.name, 'nope')})
+        self.assertEqual(got['resolved']['name'], 'Default')
+        self.assertTrue(any('does not exist' in w for w in got['resolved']['warnings']))
+
+    def test_corrupt_config_is_a_profile_error(self):
+        write(os.path.join(self.tmp.name, 'clean-docs'), 'config.json', '{')
+        with self.assertRaises(hs.ProfileError):
+            hs.profiles_dir({'XDG_CONFIG_HOME': self.tmp.name})
+
+    def test_git_problems_are_warnings_not_silence(self):
+        plain = os.path.join(self.tmp.name, 'plain')
+        os.makedirs(plain)
+        got = hs.resolve(plain, None, self.env)
+        self.assertIsNone(got['resolved']['remote'])
+        self.assertTrue(any('not matched as a git repo' in w for w in got['resolved']['warnings']))
+        subprocess.run(['git', '-C', self.repo, 'remote', 'remove', 'origin'], check=True)
+        got = hs.resolve(self.repo, None, self.env)
+        self.assertTrue(any('no origin remote' in w for w in got['resolved']['warnings']))
+
+    def test_worktree_matches_as_its_main_repo(self):
+        git = ['git', '-C', self.repo, '-c', 'user.name=t', '-c', 'user.email=t@example.com']
+        subprocess.run([*git, 'commit', '-q', '--allow-empty', '-m', 'init'], check=True)
+        tree = os.path.join(self.tmp.name, 'feature-tree')
+        subprocess.run([*git, 'worktree', 'add', '-q', tree], check=True)
+        self.profile('Named', match={'repos': ['Widget']})
+        self.assertEqual(hs.resolve(tree, None, self.env)['resolved']['name'], 'Named')
+
+    def test_cli_turns_profile_problems_into_messages(self):
+        env = dict(os.environ, XDG_CONFIG_HOME=self.tmp.name)
+        env.pop('CLEAN_DOCS_PROFILES', None)
+        write(os.path.join(self.tmp.name, 'clean-docs'), 'config.json', '{')
+        proc = subprocess.run(
+            [sys.executable, '-B', SCRIPT, 'resolve', '--repo', self.repo], capture_output=True, text=True, env=env
+        )
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn('profile error', proc.stderr)
+        self.assertNotIn('Traceback', proc.stderr)
+
+
+class Validation(unittest.TestCase):
+    def errors(self, data):
+        with tempfile.TemporaryDirectory() as folder:
+            return hs.validate({'schema': 1, **data}, 'X/profile.json', folder)
+
+    def test_null_only_where_it_removes_something(self):
+        self.assertEqual(self.errors({'tickets': {'types': {'task': None}, 'fields': None, 'urgency': None}}), [])
+        self.assertEqual(self.errors({'on_ship': {'comment': None, 'transition': None}}), [])
+        for data in (
+            {'tracker': {'site': None}},
+            {'tracker': {'kind': None}},
+            {'tickets': {'max_summary': None}},
+            {'tickets': {'types': None}},
+            {'match': None},
+        ):
+            with self.subTest(data):
+                errors = self.errors(data)
+                self.assertTrue(errors)
+                self.assertTrue(any("can't be null" in e for e in errors))
+
+    def test_types_must_be_an_object(self):
+        for types in ([], 'story'):
+            with self.subTest(types):
+                self.assertTrue(self.errors({'tickets': {'types': types}}))
+
+    def test_schema_must_be_the_integer_one(self):
+        for schema in (True, 1.0, '1'):
+            with self.subTest(schema):
+                self.assertTrue(hs.validate({'schema': schema}, 'X', hs.DEFAULT_DIR))
+
+    def test_site_may_have_a_port_and_path(self):
+        self.assertEqual(self.errors({'tracker': {'kind': 'jira', 'site': 'https://jira.example.com:8443/jira'}}), [])
+        self.assertTrue(self.errors({'tracker': {'site': 'https://jira.example.com/a b'}}))
+
+    def test_labels_cannot_carry_shell_characters(self):
+        self.assertEqual(
+            self.errors({'tickets': {'types': {'story': {'labels': ['good first issue', 'type: bug']}}}}), []
+        )
+        for label in ('$(id)', '`x`', 'a"b', 'a\\b', 'a\nb', ''):
+            with self.subTest(label):
+                self.assertTrue(self.errors({'tickets': {'types': {'story': {'labels': [label]}}}}))
 
 
 if __name__ == '__main__':

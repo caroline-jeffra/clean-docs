@@ -25,15 +25,15 @@ All optional — read them from the invocation, or from the calling skill's brie
 
 ## Step 1 — Load the house style and the forge
 
-Run `python3 -B <plugin>/scripts/house_style.py resolve` from the repo (with `--profile <Name>` if given). Exit code 3 means several profiles match equally: ask which of `candidates`, then run again with `--profile`. If `resolved.from` is `default`, say in one line that the Default style applies.
+Run `python3 -B <plugin>/scripts/house_style.py resolve` from the repo (with `--profile <Name>` if given). Exit code 3 means several profiles match equally: ask which of `candidates`, then run again with `--profile`. Say in one line which profile applies and why (`resolved.name`, `resolved.from`, `resolved.remote`) — a cloned repo's own remote picks the profile, so the user should see it — and pass on every `resolved.warnings` line.
 
-Detect the forge from `git remote get-url origin`: a host containing `gitlab` → GitLab, **merge request (MR)**; `github.com` → GitHub, **pull request (PR)**. Use that word throughout.
+The **forge** hosts the request, whatever tracker the tickets live in: `tracker.kind` when it is `github` or `gitlab`; otherwise (a Jira or `none` profile) the host of `resolved.remote` — `github.com` → GitHub, a host containing `gitlab` → GitLab. If neither tells you (a self-hosted forge with a Jira profile), ask the user which. GitLab → **merge request (MR)**, GitHub → **pull request (PR)**; use that word throughout.
 
 Done when: you hold `request.template` (a file path, or `skill:<plugin>:<skill>`) and the forge word.
 
 ## Step 2 — Gather the evidence
 
-- `git log --format='%h %s' <base>..HEAD` and `git diff --stat <base>...HEAD`; read the diff itself where the stat alone doesn't show what changed.
+- **Check `base` first:** `git rev-parse --verify --end-of-options "<base>^{commit}"` must print a commit; if not, ask the user for the base. Then `git log --format='%h %s' --end-of-options "<base>..HEAD"` and `git diff --stat --end-of-options "<base>...HEAD"`; read the diff itself where the stat alone doesn't show what changed. `--end-of-options` stops a `base` like `--output=…` from being read as an option.
 - **Spec** (if given): its problem, decisions, out-of-scope, departures and unfixed review findings. Departures and unfixed findings belong in the description — a reviewer must see where the work left the plan.
 - **Ticket** (if given): fetch it by the profile's `tracker.kind` — Jira through the Atlassian MCP (`getJiraIssue`, `cloudId` = the hostname of `tracker.site`), GitHub with `gh issue view <n>`, GitLab with `glab issue view <n>`. If it can't be fetched, carry on and say so.
 - Test evidence: tests added or changed in the diff, and any test run reported in this session.
@@ -44,13 +44,13 @@ Done when: you can say what changed, why, how it was tested, and what could brea
 
 **If `request.template` is a file:** read it and follow its title rules, its sections in order and its rules.
 
-**If it is `skill:<plugin>:<skill>`:** invoke that skill by name with the Skill tool, giving it the Step 2 evidence and saying the output must be a title and a description body only. If the skill isn't available, use the Default profile's template (`<plugin>/profiles/Default/PullRequest.md`) and say so.
+**If it is `skill:<plugin>:<skill>`:** the profile hands the diff, the spec and the ticket to another skill, so first tell the user in one line which skill will receive them, and use it only if it is installed. Invoke it by name with the Skill tool, giving it the Step 2 evidence and these rules, which override it: **return a title and a description body as text only; don't commit, push, open, edit or comment on anything, and don't run commands that change state.** If it does anything beyond returning text, say exactly what to the user. If the skill isn't available, use the Default profile's template (`<plugin>/profiles/Default/PullRequest.md`) and say so.
 
 Either way:
 
 - Write for a reviewer who hasn't seen the work. Outcomes before mechanics.
 - Name departures from the spec and decisions made along the way; don't hide unfixed findings.
-- **Never include secrets, tokens, internal hostnames, connection strings or personal data**, even from logs or the diff.
+- **Never include secrets, tokens, internal hostnames, connection strings or personal data**, even from logs or the diff. Never `@name` someone, and on GitLab start no line with `/` — GitLab runs it as a quick action.
 - The ticket link uses the tracker's own form: a Jira browse URL (`<site>/browse/<KEY>`), or `#<n>` on GitHub/GitLab — with `Closes #<n>` only when this request fully resolves that issue.
 
 Write the title (one line, no trailing newline) to `<work-dir>/request-title.txt` and the description to `<work-dir>/request.md`.

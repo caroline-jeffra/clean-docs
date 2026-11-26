@@ -39,10 +39,10 @@ A profile is a folder named in PascalCase with a `profile.json` and only the tem
 ```
 
 - **Where profiles live:** `$CLEAN_DOCS_PROFILES`, else `profiles_dir` in `~/.config/clean-docs/config.json`. Keep them somewhere private and versioned — they hold your organization's tracker and conventions, which is why none ship here.
-- **Tracker:** `"kind": "auto"` (the Default) files issues on the repo's forge — GitHub or GitLab, from the `origin` remote. Set `jira` with a `site` to use Jira; `none` turns ticket skills off for the repo.
-- **Which profile applies:** a `repos` entry naming the repo folder wins; otherwise the `remotes` glob with the most literal characters; a tie asks you; no match uses Default.
-- **Overlaying:** objects merge key by key, other values replace, `null` removes (`"types": {"task": null}`).
-- **`request.template`** may be `skill:<plugin>:<skill>` to hand MR/PR bodies to another installed skill.
+- **Tracker:** `"kind": "auto"` (the Default) files issues on the repo's forge — GitHub or GitLab, from the `origin` remote. A self-hosted GitHub Enterprise, or a GitLab whose host doesn't contain "gitlab", needs `github` or `gitlab` set explicitly. Set `jira` with a `site` to use Jira; `none` turns ticket skills off for the repo.
+- **Which profile applies:** a `repos` entry naming the repo wins (a worktree counts as its main repo); otherwise the `remotes` glob with the most literal characters; a tie asks you; no match uses Default. Matching ignores case. A cloned repo's own `origin` picks its profile, so every skill says which profile it's using; a profile folder that can't be read is skipped with a warning rather than breaking every repo.
+- **Overlaying:** objects merge key by key, other values replace, and `null` removes — allowed only for a ticket type (`"types": {"task": null}`), `tickets.fields`, `tickets.urgency`, `on_ship.comment` and `on_ship.transition`.
+- **`request.template`** may be `skill:<plugin>:<skill>` to hand MR/PR bodies to another installed skill. That skill receives the branch's diff, spec and ticket, so only name one you trust; `write-request` tells it to return text only.
 - Check a profile with `python3 scripts/house_style.py validate <dir>`; see what a repo resolves to with `python3 scripts/house_style.py resolve --repo <path>`.
 
 Ticket templates are Markdown with a section table the builder enforces — see any template in [`profiles/Default`](profiles/Default) for the format.

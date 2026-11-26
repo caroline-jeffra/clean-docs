@@ -74,16 +74,23 @@ UPDATED = 'This ticket description was restructured by a generator from the orig
 URGENCY_SUFFIX = ' Assessed ticket urgency: '
 URGENCY = GENERATED + URGENCY_SUFFIX
 NOT_INVESTIGATED = 'Codebase not yet investigated.'
-CODE_SPAN = r'`[^`]+`'
+BREAKS = '\r\n\x0b\x0c\x85\u2028\u2029'
+CODE_SPAN = rf'`[^`{BREAKS}]+`'
+PATH_ITEM = rf'`[^`<>{BREAKS}]+`'
 PROJECT_KEY = r'[A-Z][A-Z0-9]{1,9}'
 JIRA_REF = r'[A-Z][A-Z0-9]{1,9}-\d+'
 FORGE_REF = r'(?:[\w.-]+(?:/[\w.-]+)+)?#\d+'
 FORGES = ('github', 'gitlab')
 BLOCK_KINDS = ('p', 'ul', 'ol')
 MD_SPECIAL = re.compile(r'([\\`*_\[\]<>~|#!])')
-MD_BLOCK_START = re.compile(r'^(\s*)([-+>]|\d+[.)])')
-ROW = re.compile(r'^\| *\d+ *\| *(.+?) *\| *([a-z/]+) *\| *(yes|no) *\|', re.M)
-LEVEL = re.compile(r'^## \d+\. (.+?) — ', re.M)
+MD_BLOCK_START = re.compile(r'^(\s*)([-+>/=]|\d+[.)])')  # / also stops GitLab quick actions
+LINE_BREAKS = re.compile(rf'\s*[{BREAKS}]+\s*')
+MENTION = re.compile(r'(?<![\w.@+-])@[A-Za-z0-9_][\w./-]*')
+FENCE = re.compile(r'```|~~~')
+ROW = re.compile(r'^\| *\d+ *\| *(.+?) *\| *([A-Za-z/ ]+?) *\| *(yes|no) *\|', re.M | re.I)
+ROW_LIKE = re.compile(r'^\| *\d+ *\|.*$', re.M)
+LEVEL = re.compile(r'^## \d+\. (.+?) (?:—|–|--?) ', re.M)
+LEVEL_LIKE = re.compile(r'^## \d+\..*$', re.M)
 
 Section = namedtuple('Section', 'header kinds required')
 # sections: [Section]; files: the files section's header or None; levels: urgency levels, () for none
@@ -110,9 +117,13 @@ def forge(kind):
 
 def parse_template(text, where='template'):
     """The sections of a template file's table, in order."""
+    bad = [line for line in ROW_LIKE.findall(text) if not ROW.match(line)]
+    if bad:
+        sys.exit(f'{where}: table row not in the "| n | Header | Block | yes/no | ... |" format: {bad[0]!r}')
     sections = []
     for header, block, required in ROW.findall(text):
-        kinds = tuple(block.split('/'))
+        kinds = tuple(k.strip().lower() for k in block.split('/'))
+        required = required.lower()
         if kinds != ('files',) and not all(k in BLOCK_KINDS for k in kinds):
             sys.exit(f'{where}: section "{header}" has block "{block}"; use p, ul, ol joined by "/", or files')
         sections.append(Section(header, kinds, required == 'yes'))
@@ -126,6 +137,9 @@ def parse_template(text, where='template'):
 
 
 def parse_levels(text, where='urgency rubric'):
+    bad = [line for line in LEVEL_LIKE.findall(text) if not LEVEL.match(line)]
+    if bad:
+        sys.exit(f'{where}: level heading not in the "## n. Level — meaning" format: {bad[0]!r}')
     levels = tuple(LEVEL.findall(text))
     if not levels:
         sys.exit(f'{where}: no levels found (headings like "## 1. Critical — meaning")')
@@ -153,9 +167,14 @@ def template_for(profile, ticket_type):
 # ---------------------------------------------------------------- inline
 
 
+def flat(text):
+    """One line: every run of line breaks (and the space around it) becomes a single space."""
+    return LINE_BREAKS.sub(' ', text)
+
+
 def split_inline(s, refs):
     """Yield (kind, text) parts of s, kind one of 'ref', 'code' or 'text'."""
-    for part in re.split(rf'({refs}|{CODE_SPAN})', s):
+    for part in re.split(rf'({refs}|{CODE_SPAN})', flat(s)):
         if not part:
             continue
         if re.fullmatch(refs, part):
@@ -186,7 +205,7 @@ def make_inline(tracker):
                 out.append({'type': 'text', 'text': text})
         return out
 
-    return inline
+    return inline  # split_inline already flattened line breaks, as markdown() does
 
 
 # ---------------------------------------------------------------- checks
@@ -214,6 +233,7 @@ def check(blocks, template, tracker, update=False):
     for i, block in enumerate(blocks):
         check_block(i, block)
     first = blocks[0].get('p', '') if blocks else ''
+    check_text(0, [first], tracker)
     line = UPDATED if update else GENERATED
     urgency = line + URGENCY_SUFFIX
     if not template.levels:
@@ -241,6 +261,7 @@ def check(blocks, template, tracker, update=False):
         if section != template.files and kind not in by_header[section].kinds:
             fail(f'block {i}: "{section}" takes {"/".join(by_header[section].kinds)}, not {kind}')
         texts = [value] if isinstance(value, str) else value
+        check_text(i, texts, tracker)
         if section != template.files and any(re.search(CODE_SPAN, t) for t in texts):
             where = f'only in "{template.files}"' if template.files else 'nowhere in this type'
             fail(f'block {i}: code spans belong {where}, not in "{section}"')
@@ -251,11 +272,23 @@ def check(blocks, template, tracker, update=False):
         check_files(template.files, content[template.files], tracker)
 
 
+def check_text(i, texts, tracker):
+    """Refuse what the builder can't render faithfully, or what a forge would act on."""
+    for t in texts:
+        if FENCE.search(t):
+            fail(f"block {i}: code blocks (``` or ~~~) aren't supported; describe the content, or link to it")
+        if tracker.kind != 'jira':
+            plain = re.sub(CODE_SPAN, '', flat(t))
+            m = MENTION.search(plain)
+            if m:
+                fail(f'block {i}: "{m.group()}" would notify someone on {tracker.kind}; name the role instead')
+
+
 def check_files(header, blocks, tracker):
     """The files section is a list of `path` items (or the not-investigated line), then an optional Overlaps line."""
     first, rest = blocks[0], blocks[1:]
     paths = first.get('ul')
-    if not (first == {'p': NOT_INVESTIGATED} or (paths and all(re.fullmatch(CODE_SPAN, i) for i in paths))):
+    if not (first == {'p': NOT_INVESTIGATED} or (paths and all(re.fullmatch(PATH_ITEM, i) for i in paths))):
         fail(f'"{header}" must start with a bullet list of `path` items, or {{"p": "{NOT_INVESTIGATED}"}}')
     overlaps = rf'Overlaps with {tracker.overlap}(?:, {tracker.overlap})*\.'
     if rest and (len(rest) > 1 or not re.fullmatch(overlaps, rest[0].get('p', ''))):
@@ -336,7 +369,7 @@ def markdown(blocks, tracker):
             elif kind == 'code':
                 out.append(f'`{text}`')
             else:
-                out.append(MD_SPECIAL.sub(r'\\\1', ' '.join(text.split('\n'))))
+                out.append(MD_SPECIAL.sub(r'\\\1', text))
         return MD_BLOCK_START.sub(lambda m: m.group(1) + m.group(2)[:-1] + '\\' + m.group(2)[-1], ''.join(out), count=1)
 
     header = (lambda t: f'**{inline(t)}**') if tracker.kind == 'jira' else (lambda t: f'### {inline(t)}')
@@ -349,12 +382,29 @@ def markdown(blocks, tracker):
     rendered = [kinds[k](v) for b in blocks for k, v in b.items()]
     line, level = split_urgency(blocks[0].get('p', '') if blocks else '')
     if level:
+        level = MD_SPECIAL.sub(r'\\\1', level)
         rendered[0] = f'{inline(line)}**{level}**'
     return '\n\n'.join(rendered) + '\n'
 
 
 def references(blocks, tracker):
-    return sorted(set(re.findall(tracker.refs, json.dumps(blocks))))
+    """The references that render as references — not those inside code spans."""
+    texts = [t for b in blocks for v in b.values() for t in ([v] if isinstance(v, str) else v)]
+    return sorted({part for t in texts for kind, part in split_inline(t, tracker.refs) if kind == 'ref'})
+
+
+OUTPUTS = ('workitem.json', 'description.json', 'description.md', 'title.txt', 'body.md', 'issue.json')
+
+
+def prepare(out_dir):
+    """Create out_dir, and remove this script's outputs from an earlier run so no stale file is left beside new ones."""
+    if os.path.exists(out_dir) and not os.path.isdir(out_dir):
+        sys.exit(f'{out_dir} is a file, not a directory')
+    os.makedirs(out_dir, exist_ok=True)
+    for name in OUTPUTS:
+        path = os.path.join(out_dir, name)
+        if os.path.lexists(path):
+            os.remove(path)
 
 
 def write(out_dir, name, data):
@@ -394,8 +444,8 @@ def read_spec(path, max_summary):
     summary = spec['summary'].strip()
     if not summary:
         fail('summary is empty')
-    if '\n' in summary:
-        fail('summary must be one line')
+    if re.search(r'[\x00-\x1f\x7f\x85\u2028\u2029]', summary):
+        fail('summary must be one line of plain text')
     if len(summary) > max_summary:
         fail(f'summary is {len(summary)} characters; the limit is {max_summary}')
     return summary, spec['blocks'], spec.get('fields', {})
@@ -449,8 +499,11 @@ def main():
         fail(f'"fields" are Jira-only; this profile files {kind} issues')
     check(blocks, template, tracker, update is not None)
 
+    prepare(args.out_dir)
     resolved = profile['resolved']
     print(f'profile: {resolved["name"]} ({resolved["from"]}), tracker: {kind}')
+    for warning in resolved.get('warnings', []):
+        print(f'warning: {warning}')
     if kind == 'jira':
         description = adf(blocks, tracker)
         if update:
@@ -469,6 +522,8 @@ def main():
         write(args.out_dir, 'description.md', markdown(blocks, tracker))
         print(f'linkable keys: {[k for k in references(blocks, tracker) if k != update]}')
         print(f'fields: {json.dumps(fields)}')
+        if update and fields:
+            print('note: workitem.json carries no fields in update mode; set them with editJiraIssue additional_fields')
     else:
         labels = types[args.type]['labels']
         write(args.out_dir, 'title.txt', summary)

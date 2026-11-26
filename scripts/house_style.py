@@ -8,23 +8,27 @@ templates it names. Profiles live outside this plugin, in a profiles directory:
 
 The plugin ships one profile, Default, under profiles/Default. Every other profile
 is laid over it: objects merge key by key, anything else replaces, and a null
-removes the key (e.g. "types": {"task": null}). A template named in a profile is
-looked up in that profile's folder first, then in Default.
+removes the key. Null is allowed only where removing makes sense: a ticket type
+("types": {"task": null}), tickets.fields, tickets.urgency, on_ship.comment and
+on_ship.transition. A template named in a profile is looked up in that profile's
+folder first, then in Default.
 
 Usage:
   python3 house_style.py resolve [--repo PATH] [--profile NAME]
       Print the merged profile for the repo as JSON, with every template as an
-      absolute path and a "resolved" object saying which profile matched and why.
+      absolute path and a "resolved" object saying which profile matched, why,
+      and any warnings (a skipped broken profile, a git problem).
       Exits 3 when two profiles match equally well ("resolved.from" is
       "ambiguous"): ask the user, then run again with --profile.
   python3 house_style.py validate DIR
       Check one profile folder; prints "ok" or one error per line (exit 1).
 
-Matching, for the repo's `origin` remote and folder name:
-  - a "repos" entry equal to the repo folder name beats any remote glob;
+Matching, for the repo's `origin` remote and name (a worktree counts as its main
+repo), ignoring case:
+  - a "repos" entry equal to the repo name beats any remote glob;
   - otherwise the remote glob with the most literal characters wins;
   - a tie is ambiguous; no match falls back to Default.
-Remotes are compared as host/path without scheme, user, port or ".git":
+Remotes are compared as host/path without scheme, credentials, port or ".git":
   git@github.com:acme/widget.git and https://github.com/acme/widget both read
   github.com/acme/widget.
 """
@@ -45,7 +49,10 @@ FILE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]*\.md')
 SKILL_REF = re.compile(r'skill:[a-z0-9-]+:[a-z0-9-]+')
 PROJECT_KEY = re.compile(r'[A-Z][A-Z0-9]{1,9}')
 TYPE_KEY = re.compile(r'[a-z][a-z0-9-]*')
+SITE = re.compile(r'https://[A-Za-z0-9.-]+(?::\d{1,5})?(?:/[A-Za-z0-9._~-]+)*/?')
+LABEL = re.compile(r'[^\x00-\x1f\x7f"`$\\]+')
 TRACKERS = ('auto', 'jira', 'github', 'gitlab', 'none')
+NULLABLE = ('tickets.types.*', 'tickets.fields', 'tickets.urgency', 'on_ship.comment', 'on_ship.transition')
 AMBIGUOUS = 3
 
 
@@ -70,54 +77,89 @@ def profiles_dir(env=None):
     path = config_path(env)
     if not os.path.exists(path):
         return None
-    with open(path, encoding='utf-8-sig') as f:
-        config = json.load(f)
+    try:
+        with open(path, encoding='utf-8-sig') as f:
+            config = json.load(f)
+    except (OSError, ValueError) as e:
+        raise ProfileError(f"{path}: can't be read as JSON ({e})") from e
     value = config.get('profiles_dir') if isinstance(config, dict) else None
     if not isinstance(value, str) or not value.strip():
         raise ProfileError(f'{path}: "profiles_dir" must be a path to the folder holding your profiles')
     return os.path.expanduser(value)
 
 
-def available(pdir):
-    """{name: folder} for every profile folder in pdir (Default is never taken from there)."""
-    if not pdir or not os.path.isdir(pdir):
+def available(pdir, warnings):
+    """{name: folder} for every profile folder in pdir; a folder named Default there is ignored, with a warning."""
+    if not pdir:
         return {}
-    return {
-        name: os.path.join(pdir, name)
-        for name in sorted(os.listdir(pdir))
-        if NAME.fullmatch(name) and name != 'Default' and os.path.isfile(os.path.join(pdir, name, 'profile.json'))
-    }
+    if not os.path.isdir(pdir):
+        warnings.append(f'profiles directory {pdir} does not exist; using Default')
+        return {}
+    try:
+        names = sorted(os.listdir(pdir))
+    except OSError as e:
+        raise ProfileError(f"profiles directory {pdir} can't be read ({e})") from e
+    found = {}
+    for name in names:
+        if not (NAME.fullmatch(name) and os.path.isfile(os.path.join(pdir, name, 'profile.json'))):
+            continue
+        if name == 'Default':
+            warnings.append(f'{pdir}/Default is ignored: Default is the built-in profile; rename yours')
+            continue
+        found[name] = os.path.join(pdir, name)
+    return found
 
 
 # ---------------------------------------------------------------- matching
 
 
 def normalize_remote(url):
-    """host/path of a git remote URL: no scheme, user, port or .git suffix, lower-case host."""
+    """host/path of a git remote URL — no scheme, credentials, port or .git suffix, lower-case host — or None."""
     url = url.strip()
-    m = re.fullmatch(r'[a-z+]+://(?:[^@/]+@)?([^/:]+)(?::\d+)?/(.+)', url)
+    m = re.fullmatch(r'(?i)[a-z][a-z0-9+.-]*://(?:[^@/]*@)?([^/:@]+)(?::\d+)?/(.+)', url)
     if not m:
-        m = re.fullmatch(r'(?:[^@/]+@)?([^/:]+):(.+)', url)  # scp-like: git@host:group/repo.git
+        m = re.fullmatch(r'(?:[^@/:]+@)?([^/:@]+):(?!//)(.+)', url)  # scp-like: git@host:group/repo.git
     if not m:
-        return url
+        return None
     path = re.sub(r'\.git$', '', m.group(2).strip('/'))
-    return m.group(1).lower() + '/' + path
+    return m.group(1).lower() + '/' + path if path else None
 
 
-def repo_facts(repo):
-    """(normalized origin remote or None, repo folder name) for the git repo at repo."""
-    top = repo
+def git(repo, *args):
+    """(stdout, None) or (None, the first line of the error)."""
     try:
-        top = subprocess.run(
-            ['git', '-C', repo, 'rev-parse', '--show-toplevel'], capture_output=True, text=True, check=True
-        ).stdout.strip()
-        url = subprocess.run(
-            ['git', '-C', repo, 'remote', 'get-url', 'origin'], capture_output=True, text=True, check=True
-        ).stdout.strip()
-        remote = normalize_remote(url) if url else None
-    except (OSError, subprocess.CalledProcessError):
-        remote = None
-    return remote, os.path.basename(os.path.abspath(top))
+        proc = subprocess.run(['git', '-C', repo, *args], capture_output=True, text=True, check=False)
+    except OSError as e:
+        return None, f'git could not run ({e})'
+    if proc.returncode:
+        return None, (proc.stderr.strip().splitlines() or ['git failed'])[0]
+    return proc.stdout.strip(), None
+
+
+def repo_facts(repo, warnings):
+    """(normalized origin remote or None, repo name) for the git repo at repo; problems go to warnings.
+
+    The repo name is the main repo's folder, so a linked worktree matches like its repo.
+    """
+    name = os.path.basename(os.path.abspath(repo))
+    common, error = git(repo, 'rev-parse', '--git-common-dir')
+    if error:
+        warnings.append(f'{repo}: not matched as a git repo ({error})')
+        return None, name
+    common = os.path.abspath(os.path.join(repo, common))
+    if os.path.basename(common) == '.git':
+        name = os.path.basename(os.path.dirname(common))
+    else:
+        top, _ = git(repo, 'rev-parse', '--show-toplevel')
+        name = os.path.basename(top) if top else re.sub(r'\.git$', '', os.path.basename(common))
+    url, error = git(repo, 'remote', 'get-url', 'origin')
+    if error:
+        warnings.append(f'{name}: no origin remote ({error}); only "repos" entries can match')
+        return None, name
+    remote = normalize_remote(url)
+    if remote is None:
+        warnings.append(f'{name}: the origin remote isn\'t a URL this tool understands; only "repos" entries can match')
+    return remote, name
 
 
 def literal_length(pattern):
@@ -128,20 +170,32 @@ def match_score(match, remote, repo_name):
     """How well a profile's "match" fits; None when it doesn't (or is malformed — validate reports that)."""
     if not isinstance(match, dict):
         return None
-    if isinstance(match.get('repos'), list) and repo_name in match['repos']:
+    repos = match.get('repos') if isinstance(match.get('repos'), list) else []
+    if repo_name.lower() in (r.lower() for r in repos if isinstance(r, str)):
         return float('inf')
-    globs = (
-        [g for g in match.get('remotes', []) if isinstance(g, str)] if isinstance(match.get('remotes'), list) else []
-    )
-    scores = [literal_length(g) for g in globs if remote and fnmatch.fnmatchcase(remote, g)]
+    globs = match.get('remotes') if isinstance(match.get('remotes'), list) else []
+    scores = [
+        literal_length(g)
+        for g in globs
+        if isinstance(g, str) and remote and fnmatch.fnmatchcase(remote.lower(), g.lower())
+    ]
     return max(scores) if scores else None
 
 
-def choose(profiles, remote, repo_name):
-    """(name or None, how) — how is repos | remote | default | ambiguous; ambiguous also returns the tied names."""
+def choose(profiles, remote, repo_name, warnings):
+    """(name or None, how, tied) — how is repos | remote | default | ambiguous; ambiguous also returns the tied names.
+
+    A profile whose profile.json can't be read is skipped with a warning, so one broken profile
+    doesn't stop every other repo from resolving.
+    """
     scored = []
     for name, folder in profiles.items():
-        score = match_score(read_json(folder).get('match', {}), remote, repo_name)
+        try:
+            data = read_json(folder)
+        except ProfileError as e:
+            warnings.append(f'skipped profile {name}: {e}')
+            continue
+        score = match_score(data.get('match', {}), remote, repo_name)
         if score is not None:
             scored.append((score, name))
     if not scored:
@@ -181,6 +235,16 @@ def merge(base, over):
     return out
 
 
+def null_paths(obj, prefix=''):
+    """Dotted paths of every null value in obj."""
+    for key, value in obj.items():
+        path = f'{prefix}{key}'
+        if value is None:
+            yield path
+        elif isinstance(value, dict):
+            yield from null_paths(value, path + '.')
+
+
 def validate(data, where, folder):
     """Return a list of errors for one profile.json (raw, before merging)."""
     errors = []
@@ -205,8 +269,14 @@ def validate(data, where, folder):
         elif not (os.path.isfile(os.path.join(folder, value)) or os.path.isfile(os.path.join(DEFAULT_DIR, value))):
             err(f'"{label}": {value} is in neither this profile nor Default')
 
+    for path in null_paths(data):
+        if not any(fnmatch.fnmatchcase(path, allowed) for allowed in NULLABLE):
+            err(f'"{path}" can\'t be null; null removes only {", ".join(NULLABLE)}')
+    data = {k: v for k, v in data.items() if v is not None}
+
     check_keys(data, ('schema', 'match', 'tracker', 'request', 'tickets', 'on_ship'), '')
-    if data.get('schema') != SCHEMA:
+    schema = data.get('schema')
+    if type(schema) is not int or schema != SCHEMA:
         err(f'"schema" must be {SCHEMA}')
 
     match = data.get('match', {})
@@ -220,10 +290,8 @@ def validate(data, where, folder):
     if check_keys(tracker, ('kind', 'site', 'link_projects'), 'tracker'):
         if 'kind' in tracker and tracker['kind'] not in TRACKERS:
             err(f'"tracker.kind" must be one of {list(TRACKERS)}')
-        if 'site' in tracker and not (
-            isinstance(tracker['site'], str) and re.fullmatch(r'https://[A-Za-z0-9.-]+/?', tracker['site'])
-        ):
-            err('"tracker.site" must be an https URL such as https://example.atlassian.net')
+        if 'site' in tracker and not (isinstance(tracker['site'], str) and SITE.fullmatch(tracker['site'])):
+            err('"tracker.site" must be an https URL such as https://example.atlassian.net (a port and path are fine)')
         keys = tracker.get('link_projects', [])
         if not isinstance(keys, list) or not all(isinstance(k, str) and PROJECT_KEY.fullmatch(k) for k in keys):
             err('"tracker.link_projects" must be a list of project keys such as ["ABC"]')
@@ -242,7 +310,7 @@ def validate(data, where, folder):
     tickets = data.get('tickets', {})
     if check_keys(tickets, ('types', 'fields', 'urgency', 'max_summary'), 'tickets'):
         types = tickets.get('types', {})
-        if check_keys(types, types.keys(), 'tickets.types'):
+        if isinstance(types, dict):
             for key, spec in types.items():
                 if not TYPE_KEY.fullmatch(key):
                     err(f'"tickets.types.{key}": type keys are lower-case words such as "story"')
@@ -253,18 +321,21 @@ def validate(data, where, folder):
                 if 'name' in spec and not (isinstance(spec['name'], str) and spec['name'].strip()):
                     err(f'"tickets.types.{key}.name" must be the tracker\'s issue type name')
                 labels = spec.get('labels', [])
-                if not isinstance(labels, list) or not all(isinstance(v, str) and v.strip() for v in labels):
-                    err(f'"tickets.types.{key}.labels" must be a list of issue label names')
+                if not isinstance(labels, list) or not all(
+                    isinstance(v, str) and v.strip() and LABEL.fullmatch(v) for v in labels
+                ):
+                    err(f'"tickets.types.{key}.labels" must be a list of label names without quotes, $, ` or \\')
                 if 'template' in spec:
                     check_file(spec['template'], f'tickets.types.{key}.template')
                 if 'urgency' in spec and not isinstance(spec['urgency'], bool):
                     err(f'"tickets.types.{key}.urgency" must be true or false')
+        elif 'types' in tickets:
+            err('"tickets.types" must be an object of types; remove one type with "types": {"<type>": null}')
         for key in ('fields', 'urgency'):
             if key in tickets:
                 check_file(tickets[key], f'tickets.{key}', nullable=True)
-        if 'max_summary' in tickets and not (
-            isinstance(tickets['max_summary'], int) and 20 <= tickets['max_summary'] <= 255
-        ):
+        limit = tickets.get('max_summary', 80)
+        if type(limit) is not int or not 20 <= limit <= 255:
             err('"tickets.max_summary" must be a whole number from 20 to 255')
 
     on_ship = data.get('on_ship', {})
@@ -323,6 +394,7 @@ def load(name, folder, remote=None):
 
 
 def infer_tracker(remote):
+    """github or gitlab from the remote's host, else none — a self-hosted forge needs tracker.kind set in a profile."""
     host = (remote or '').split('/', 1)[0]
     if host == 'github.com':
         return 'github'
@@ -332,9 +404,10 @@ def infer_tracker(remote):
 
 
 def resolve(repo='.', force=None, env=None):
-    """The merged profile for repo, plus a "resolved" object: {name, from, dir, candidates, remote}."""
-    remote, repo_name = repo_facts(repo)
-    profiles = available(profiles_dir(env))
+    """The merged profile for repo, plus a "resolved" object: {name, from, dir, candidates, remote, warnings}."""
+    warnings = []
+    remote, repo_name = repo_facts(repo, warnings)
+    profiles = available(profiles_dir(env), warnings)
     if force:
         if force == 'Default':
             name, how, tied = 'Default', 'forced', []
@@ -343,13 +416,14 @@ def resolve(repo='.', force=None, env=None):
         else:
             raise ProfileError(f'no profile named {force}; available: {["Default", *profiles]}')
     else:
-        name, how, tied = choose(profiles, remote, repo_name)
+        name, how, tied = choose(profiles, remote, repo_name, warnings)
+    resolved = {'name': None, 'from': how, 'dir': None, 'candidates': tied, 'remote': remote, 'warnings': warnings}
     if how == 'ambiguous':
-        return {'resolved': {'name': None, 'from': how, 'dir': None, 'candidates': tied, 'remote': remote}}
+        return {'resolved': resolved}
     name = name or 'Default'
     folder = DEFAULT_DIR if name == 'Default' else profiles[name]
     profile = load(name, folder, remote)
-    profile['resolved'] = {'name': name, 'from': how, 'dir': folder, 'candidates': [], 'remote': remote}
+    profile['resolved'] = dict(resolved, name=name, dir=folder)
     return profile
 
 
