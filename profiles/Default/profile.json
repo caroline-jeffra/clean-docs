@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "match": {"remotes": [], "repos": []},
+  "tracker": {"kind": "auto", "link_projects": []},
+  "request": {"template": "PullRequest.md", "draft": true},
+  "tickets": {
+    "types": {
+      "story": {"name": "Story", "labels": ["enhancement"], "template": "TicketStory.md", "urgency": true},
+      "bug": {"name": "Bug", "labels": ["bug"], "template": "TicketBug.md", "urgency": true},
+      "task": {"name": "Task", "labels": [], "template": "TicketTask.md", "urgency": true}
+    },
+    "urgency": "Urgency.md",
+    "max_summary": 80
+  },
+  "on_ship": {"comment": "TicketUpdate.md", "transition": null}
+}
