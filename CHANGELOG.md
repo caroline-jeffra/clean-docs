@@ -2,6 +2,15 @@
 
 One entry per plugin version (`.claude-plugin/plugin.json`). Each release is tagged `X.Y.Z` (no `v` prefix) on `main`. CI checks that the top entry matches the version.
 
+## [0.2.0]
+
+- **Per-repo overrides**: a profile can hold named `overrides`, each with its own `match`. An override sets one repo's tracker destination or templates on top of the shared organization style. Settings apply as Default, then the profile, then the override. Force one with `--profile Name/Override`.
+- **`tracker.project`** (the default Jira project, always a link key) and **`tracker.repo`** (the forge repo issues go to, as `owner/repo` or `group/sub/repo`). Both can be set to `null` in an override. The skills don't use them yet.
+- **Hardening**:
+  - templates that symlink outside the profile folder are refused;
+  - duplicate JSON keys are rejected;
+  - `validate DIR` checks every override.
+
 ## [0.1.0]
 
 - **Profiles** — per-project house styles: a `profile.json` plus only the templates it changes, laid over the shipped `Default` profile and matched to a repo by remote glob or repo name (`scripts/house_style.py`).
