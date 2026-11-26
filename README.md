@@ -60,7 +60,7 @@ Then run `/init-profile` to point the plugin at your profiles directory and crea
 
 | Dependency | Needed by |
 |------------|-----------|
-| `python3` 3.9+ (standard library only) | all skills, to resolve profiles; `file-ticket` to build descriptions |
+| `python3` 3.10+ (standard library only) | all skills, to resolve profiles; `file-ticket` to build descriptions |
 | `gh` (GitHub) or `glab` (GitLab), authenticated | all skills on those forges — the default |
 | Atlassian MCP connected, with access to the Jira site — or `acli`, authenticated, as the fallback | `file-ticket`, `write-request` and `update-ticket` on Jira profiles only |
 
