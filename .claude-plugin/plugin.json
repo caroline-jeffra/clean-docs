@@ -1,6 +1,6 @@
 {
   "name": "clean-docs",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "House-style developer documentation: per-project profiles drive tickets on GitHub, GitLab or Jira (file-ticket), MR/PR descriptions (write-request) and ship-time ticket updates (update-ticket); init-profile sets a profile up.",
   "author": { "name": "caroline-jeffra" },
   "repository": "https://github.com/caroline-jeffra/clean-docs",

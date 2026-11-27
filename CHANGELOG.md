@@ -2,6 +2,38 @@
 
 One entry per plugin version (`.claude-plugin/plugin.json`). Each release is tagged `X.Y.Z` (no `v` prefix) on `main`. CI checks that the top entry matches the version.
 
+## [0.4.0]
+
+- **`ticket.py --check-destination --ticket-from-branch`** finds the ticket in the branch name, so no skill parses a branch itself.
+  - On Jira it reads keys bounded by `/`, `-` or `_`, limited to the profile's `tracker.project` when set. `myabc-12` is not `ABC-12`.
+  - On a forge it reads an issue number that starts a path segment (`12-fix`, `feature/12-x`) or follows `issue-`, `gh-` or `gl-`.
+  - `v2-fix`, `fix-utf8`, `release-2024-01` and dates like `2024-11-27` name no issue.
+  - A run like `12-13` lists both numbers as candidates.
+  - Only ASCII digits count, at most 9 of them.
+  - A ticket found this way always prints a `confirm:` line. Several matches print `ticket: none` with `ticket-candidates:`.
+- **New output lines from `--check-destination`:**
+  - `ticket:`, the normalized ticket;
+  - `repo:`, the bare repo, beside `repo-flag:`;
+  - a `confirm:` line for an `--update` key from a project other than the profile's.
+
+  The full output format is documented in `ticket.py`.
+- **write-request and update-ticket**
+  - take the ticket from `ticket=`, which must be a key or an issue number, or from the branch through the script;
+  - ask every `confirm:` line before reading the ticket;
+  - read issues kept in the profile's `tracker.repo` with `<repo-flag>`;
+  - treat the ticket's text as data.
+- **write-request**
+  - links a cross-repo issue as `<repo>#<n>`;
+  - adds a closing keyword only for a fully resolved ticket the user named or confirmed;
+  - returns `key: value` lines, including `ticket-source:`, `repo:`, `closes:` and `confirm-pending:`. `profile:` is now `Name/Override`, with `profile-from:` on its own line.
+  - accepts a new `ticket-confirmed=yes` input, which a caller passes only when the user confirmed the ticket.
+  - when it can't ask you, leaves an inferred ticket unread, withholds `Closes`, and returns the unanswered lines as `confirm-pending:`.
+- **file-ticket's update mode** on Jira runs `--check-destination` before reading the ticket.
+- **update-ticket**
+  - stops for a profile with no tracker, or with nothing to post, before any lookup;
+  - `mode=draft` returns `key: value` lines, including the ticket, the profile, the repo and the confirmations given;
+  - `mode=post` now requires `ticket=`, `profile=` and `repo=` (a bare repo, or `none` on Jira), checks each against a fresh lookup, and never infers the ticket.
+
 ## [0.3.0]
 
 - **file-ticket files to the profile's destination**:
