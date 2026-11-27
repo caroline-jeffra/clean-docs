@@ -84,7 +84,7 @@ Done when: the build succeeds, and the draft contains no secret or personal data
 Show the user, as readable text (rendered headers, real lists — not the JSON spec):
 
 - the profile (`Name/Override`) and tracker, the destination exactly as the build's `destination:` line gives it — Jira project or forge repo, and where it came from — the type, and the summary with its character count;
-- every `confirm:` line the build printed — a destination inferred rather than named by the user, a project replacing the profile's, an issue going to a repo other than this one that the user didn't name, or an origin on a host the tracker doesn't match — **asked as an explicit question**. The user must answer it, separately from approving the text; without that answer, don't create.
+- every `confirm:` line the build printed — a destination inferred rather than named by the user, a project replacing the profile's (also an `--update` key from another project), an issue going to a repo other than this one that the user didn't name, or an origin on a host the tracker doesn't match — **asked as an explicit question**. (The builder's output lines are specified in its docstring, [`scripts/ticket.py`](scripts/ticket.py).) The user must answer it, separately from approving the text; without that answer, don't create.
 - the description;
 - what the build printed: the Jira keys that will be linked as Relates, or the forge labels that will be applied;
 - for a type with urgency, one line outside the ticket naming the rubric line behind the level;
