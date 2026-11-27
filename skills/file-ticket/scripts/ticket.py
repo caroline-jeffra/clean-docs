@@ -5,14 +5,35 @@ Usage: python3 ticket.py SPEC.json OUT_DIR --type TYPE [--project KEY] [--projec
                          [--profile NAME] [--repo PATH]
 
   python3 ticket.py --check-destination [the same destination options]
+                         [--ticket-from-branch [--branch NAME]]
 
-Besides the files, it prints the profile, a "destination:" line, one "confirm:" line
-per reason the user should confirm where the ticket goes (a destination inferred
-rather than named, another repo than this one, a project replacing the profile's, an
-origin on a host the tracker doesn't match) and, on a forge, a "repo-flag:" line to
-add to every gh/glab command ("none": add nothing). Lines are printed only after every
-file is written. --check-destination prints the same lines without building, for
-reading an existing ticket before any spec exists. --inferred marks a --project or
+Output contract (clean-docs 0.4.0+; other skills and callers parse it). One
+"key: value" per line, printed only after every file is written, in this order:
+
+  profile: NAME[/OVERRIDE] (FROM), tracker: KIND
+  branch: "NAME"                  --ticket-from-branch only (JSON string)
+  ticket: KEY | #N | none         --update or --ticket-from-branch; normalized
+  ticket-candidates: [...]        when the branch names several (then ticket: none)
+  destination: TEXT (from SOURCE) Jira project, or forge repo / this repo's origin
+  confirm: TEXT                   zero or more; each must be put to the user
+  repo: OWNER/REPO | none         forge only: the repo issues live in, plain data
+  repo-flag: -R "OWNER/REPO" | none   forge only: the same, as gh/glab arguments
+  warning: "TEXT"                 zero or more (JSON string)
+
+A confirm: line is printed for a destination inferred rather than named (--inferred,
+or a ticket from the branch), a project replacing the profile's, another repo than
+this one that the user didn't name, and an origin on a host the tracker doesn't
+match. Values from outside (branch, origin, warnings) are JSON-quoted; repo values are
+limited by house_style.forge_repo_ok to [A-Za-z0-9_.-] and "/". With "ticket: none"
+no destination, repo: or repo-flag: line is printed. Build mode follows with its own lines (references,
+labels, linkable keys, fields).
+
+--check-destination prints those lines without building, for reading an existing
+ticket before any spec exists. --ticket-from-branch finds the ticket in the branch
+name instead of --update: Jira keys bounded by "/", "-", "_" or the ends (only the
+profile's tracker.project when set), or forge issue numbers that start a path
+segment (12-fix, not a date like 2024-01) or follow issue-/gh-/gl-; a run like
+12-13 lists both as candidates. --inferred marks a --project or
 --forge-repo that came from the repo (branch, commits, README), not from the user.
 
 The house style comes from the clean-docs profile for the repo (scripts/house_style.py
@@ -77,6 +98,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 from collections import namedtuple
 
@@ -489,9 +511,21 @@ def main():
     ap.add_argument(
         '--check-destination', action='store_true', help='print the destination lines only; no spec, no files'
     )
+    ap.add_argument(
+        '--ticket-from-branch',
+        action='store_true',
+        help='with --check-destination: find the ticket in the branch name (instead of --update)',
+    )
+    ap.add_argument('--branch', help="branch name for --ticket-from-branch (default: the repo's current branch)")
     args = ap.parse_args()
     if not args.check_destination and not (args.spec and args.out_dir and args.type):
         ap.error('SPEC, OUT_DIR and --type are required unless --check-destination is given')
+    if args.ticket_from_branch and not args.check_destination:
+        ap.error('--ticket-from-branch goes with --check-destination')
+    if args.ticket_from_branch and args.update is not None:
+        ap.error('--ticket-from-branch finds the ticket; leave out --update')
+    if args.branch is not None and not args.ticket_from_branch:
+        ap.error('--branch goes with --ticket-from-branch')
 
     profile = load_profile(args.repo, args.profile)
     kind = profile['tracker']['kind']
@@ -507,6 +541,23 @@ def main():
             sys.exit(f'{flag} is empty; leave it out instead')
     if args.inferred and args.project is None and args.forge_repo is None:
         sys.exit('--inferred describes --project or --forge-repo; give one')
+    ticket_lines = []
+    if args.ticket_from_branch:
+        branch = current_branch(args.repo) if args.branch is None else args.branch
+        found = branch_tickets(branch, kind, profile['tracker'].get('project'))
+        ticket_lines.append(f'branch: {json.dumps(branch)}')
+        if len(found) != 1:
+            ticket_lines.append('ticket: none')
+            if found:
+                ticket_lines.append(f'ticket-candidates: {json.dumps(found)}')
+            warnings = [f'warning: {json.dumps(w)}' for w in resolved.get('warnings', [])]
+            print('\n'.join([f'profile: {shown} ({resolved["from"]}), tracker: {kind}', *ticket_lines, *warnings]))
+            return
+        args.update = found[0]
+        shown_ticket = found[0] if kind == 'jira' else f'#{found[0]}'
+        confirms.append(
+            f'confirm: ticket {shown_ticket} was inferred from branch {json.dumps(branch)}, not named by you'
+        )
     if kind == 'jira':
         if args.forge_repo is not None:
             sys.exit(f'--forge-repo is for GitHub and GitLab; this profile files {kind} tickets')
@@ -530,8 +581,10 @@ def main():
         replaces = f", replacing the profile's project {default}" if default and default != args.project else ''
         if args.inferred:
             confirms.append(f'confirm: project {args.project} was inferred from the repo, not named by you{replaces}')
-        elif source == '--project' and replaces:
-            confirms.append(f'confirm: project {args.project} (from --project){replaces}')
+        elif replaces:
+            confirms.append(f'confirm: project {args.project} (from {source}){replaces}')
+        if update:
+            ticket_lines.append(f'ticket: {update}')
         extra = [k.strip().upper() for k in args.projects.split(',') if k.strip()]
         bad = [k for k in extra if not re.fullmatch(PROJECT_KEY, k)]
         if bad:
@@ -547,14 +600,17 @@ def main():
             if not m:
                 sys.exit('--update takes an issue number such as 12 or #12')
             update = int(m.group(1))
+            ticket_lines.append(f'ticket: #{update}')
         tracker = forge(kind)
         repo, destination, more = forge_destination(
             kind, args.forge_repo, args.inferred, profile['tracker'].get('repo'), shown, resolved
         )
         confirms += more
 
-    head = [f'profile: {shown} ({resolved["from"]}), tracker: {kind}', f'destination: {destination}', *confirms]
+    head = [f'profile: {shown} ({resolved["from"]}), tracker: {kind}', *ticket_lines]
+    head += [f'destination: {destination}', *confirms]
     if kind != 'jira':
+        head.append(f'repo: {repo or "none"}')
         head.append(f'repo-flag: -R "{repo}"' if repo else 'repo-flag: none')
     head += [f'warning: {json.dumps(w)}' for w in resolved.get('warnings', [])]
     if args.check_destination:
@@ -601,6 +657,50 @@ def main():
         report.append(f'labels: {json.dumps(labels)}')
     # Printed only once every file is written, so a failed build never shows a destination.
     print('\n'.join(head + report))
+
+
+def current_branch(repo):
+    try:
+        proc = subprocess.run(
+            ['git', '-C', repo, 'branch', '--show-current'], capture_output=True, text=True, check=False, timeout=10
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ''
+    return proc.stdout.strip() if proc.returncode == 0 else ''
+
+
+BRANCH_SEP = r'(?:^|(?<=[/_-]))'
+BRANCH_END = r'(?=$|[/_-])'
+NUMBER = r'[0-9]{1,9}'
+NUMBER_RUN = rf'({NUMBER}(?:[-_]{NUMBER})*)'  # 12, or 12-13: every number in the run is a candidate
+DATE_START = re.compile(r'[0-9]{4}[-_][0-9]{1,2}' + BRANCH_END)  # 2024-01…, a date or version, not an issue
+
+
+def branch_tickets(branch, kind, project):
+    """Distinct tickets a branch name names, in order: Jira keys (only the profile's project when it sets one),
+    or forge issue numbers as strings. Only whole, separator-bounded parts count, so v2-fix, fix-utf8,
+    release-2024-01 and release/2024-01 name no issue, and myabc-12 is not ABC-12. A run like 12-13 names
+    both, so the caller sees the ambiguity. ASCII digits only, at most 9 of them.
+    """
+    if kind == 'jira':
+        keys = [
+            f'{m.group(1).upper()}-{int(m.group(2))}'
+            for m in re.finditer(BRANCH_SEP + rf'([A-Za-z][A-Za-z0-9]{{1,9}})-({NUMBER})' + BRANCH_END, branch, re.A)
+        ]
+        if project:
+            keys = [k for k in keys if k.rsplit('-', 1)[0] == project]
+        return list(dict.fromkeys(keys))
+    numbers = []
+    for segment in branch.split('/'):
+        runs = []
+        if not DATE_START.match(segment):
+            m = re.match(NUMBER_RUN + BRANCH_END, segment, re.A)  # a segment that starts with the number: 12-fix
+            if m:
+                runs.append(m.group(1))
+        runs += re.findall(BRANCH_SEP + r'(?:issue|gh|gl)[-_]' + NUMBER_RUN + BRANCH_END, segment, re.A | re.I)
+        for run in runs:
+            numbers += re.split(r'[-_]', run)
+    return list(dict.fromkeys(str(int(n)) for n in numbers))
 
 
 def forge_destination(kind, named, inferred, profile_repo, shown, resolved):
