@@ -523,17 +523,18 @@ class Cli(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn('tracker.project', proc.stderr)
 
-    def test_jira_update_takes_its_project_from_the_key_without_asking(self):
+    def test_jira_update_takes_its_project_from_the_key(self):
         blocks = task(*VALID_TASK)
         blocks[0] = {'p': ticket.UPDATED + ticket.URGENCY_SUFFIX + 'Nice to have'}
         spec = {'summary': 's', 'blocks': blocks}
-        for key, project in (('OPS-7', 'OPS'), ('proj-7', 'PROJ')):
+        for key, project, asks in (('OPS-7', 'OPS', False), ('proj-7', 'PROJ', True)):
             with self.subTest(key):
                 proc, out = self.run_cli(spec, '--type', 'task', '--update', key, profile='Acme/Ops')
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertEqual(out['workitem.json']['issues'], [key.upper()])
                 self.assertIn(f'destination: project {project} (from --update {key.upper()})', proc.stdout)
-                self.assertEqual(self.confirms(proc.stdout), [])
+                expected = ["confirm: project PROJ (from --update PROJ-7), replacing the profile's project OPS"]
+                self.assertEqual(self.confirms(proc.stdout), expected if asks else [])
         proc, _ = self.run_cli(spec, '--type', 'task', '--update', 'PROJ-7', '--project', 'OPS', profile='Acme/Ops')
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn('--update PROJ-7 is not in project OPS (from --project)', proc.stderr)
@@ -646,6 +647,7 @@ class Cli(unittest.TestCase):
                     'profile: Hub/Issues (forced), tracker: github',
                     'destination: acme/issues (from profile Hub/Issues)',
                     'confirm: the issue goes to acme/issues (profile Hub/Issues), not this repo ("acme/widget")',
+                    'repo: acme/issues',
                     'repo-flag: -R "acme/issues"',
                 ],
             )
@@ -659,6 +661,184 @@ class Cli(unittest.TestCase):
             )
             self.assertNotEqual(proc.returncode, 0)
             self.assertIn('required unless --check-destination', proc.stderr)
+
+    def test_check_destination_with_an_update_ticket(self):
+        with tempfile.TemporaryDirectory() as repo:
+            env = dict(os.environ, CLEAN_DOCS_PROFILES=FIXTURES, XDG_CONFIG_HOME=repo)
+
+            def run(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', SCRIPT, '--check-destination', '--repo', repo, *args],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    check=False,
+                )
+
+            proc = run('--profile', 'Acme/Ops', '--update', 'ops-12')
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn('ticket: OPS-12', proc.stdout)
+            self.assertIn('destination: project OPS (from --update OPS-12)', proc.stdout)
+            self.assertNotIn('repo:', proc.stdout)
+            self.assertNotIn('repo-flag:', proc.stdout)
+            self.assertNotIn('confirm:', proc.stdout)
+            proc = run('--profile', 'Acme/Ops', '--update', 'proj-12')
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn(
+                "confirm: project PROJ (from --update PROJ-12), replacing the profile's project OPS", proc.stdout
+            )
+            for ref in ('#12', '12'):
+                with self.subTest(ref):
+                    proc = run('--profile', 'Hub/Issues', '--update', ref)
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    self.assertIn('ticket: #12', proc.stdout)
+                    self.assertIn('destination: acme/issues (from profile Hub/Issues)', proc.stdout)
+                    self.assertIn('repo: acme/issues', proc.stdout)
+                    self.assertIn('repo-flag: -R "acme/issues"', proc.stdout)
+            for args in (('--profile', 'Hub', '--update', 'ABC-1'), ('--profile', 'Acme', '--update', '12')):
+                with self.subTest(args):
+                    proc = run(*args)
+                    self.assertNotEqual(proc.returncode, 0)
+                    self.assertEqual(proc.stdout, '')
+
+    def test_branch_tickets(self):
+        cases = {
+            ('github', None): {
+                '12-fix': ['12'],
+                'feature/12-x': ['12'],
+                'issue-12': ['12'],
+                'gh-7-thing': ['7'],
+                'fix/GH_9': ['9'],
+                '12': ['12'],
+                'release-2024-01': [],
+                'v2-fix': [],
+                'fix-utf8': [],
+                'fix-12': [],
+                'main': [],
+                '': [],
+                '12-a/issue-13': ['12', '13'],
+                '12-34': ['12', '34'],
+                'issue-12-13': ['12', '13'],
+                'issue_7': ['7'],
+                'release/2024-01': [],
+                'hotfix/2024-11-27': [],
+                '2024-11-27-cleanup': [],
+                'fix/gl2-shader': [],
+                'x-gh2024-update': [],
+                'issues-5': [],
+                'issue-\u0661\u0662': [],
+                '\uff11\uff12-fix': [],
+                'issue-' + '9' * 40: [],
+            },
+            ('jira', 'ABC'): {
+                'abc-12-fix': ['ABC-12'],
+                'feature/ABC-12_x': ['ABC-12'],
+                'myabc-12': [],
+                'xyz-3-fix': [],
+                'abc-12-and-abc-13': ['ABC-12', 'ABC-13'],
+                'abc-12/abc-12-again': ['ABC-12'],
+                'ABC-\uff11\uff12': [],
+                'abc-' + '1' * 40: [],
+            },
+            ('jira', None): {'xyz-3-fix': ['XYZ-3'], 'myabc-12': ['MYABC-12'], 'main': [], 'v2': []},
+        }
+        for (kind, project), branches in cases.items():
+            for branch, expected in branches.items():
+                with self.subTest(kind=kind, branch=branch):
+                    self.assertEqual(ticket.branch_tickets(branch, kind, project), expected)
+
+    def test_ticket_from_branch(self):
+        with tempfile.TemporaryDirectory() as repo:
+            subprocess.run(['git', 'init', '-q', '-b', 'ops-42-fix', repo], check=True)
+            env = dict(os.environ, CLEAN_DOCS_PROFILES=FIXTURES, XDG_CONFIG_HOME=repo)
+
+            def run(*args):
+                return subprocess.run(
+                    [
+                        sys.executable,
+                        '-B',
+                        SCRIPT,
+                        '--check-destination',
+                        '--ticket-from-branch',
+                        '--repo',
+                        repo,
+                        *args,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    check=False,
+                )
+
+            proc = run('--profile', 'Acme/Ops')
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(
+                [line for line in proc.stdout.splitlines() if not line.startswith('warning:')],
+                [
+                    'profile: Acme/Ops (forced), tracker: jira',
+                    'branch: "ops-42-fix"',
+                    'ticket: OPS-42',
+                    'destination: project OPS (from --update OPS-42)',
+                    'confirm: ticket OPS-42 was inferred from branch "ops-42-fix", not named by you',
+                ],
+            )
+            proc = run('--profile', 'Hub/Issues', '--branch', 'feature/12-x')
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn('ticket: #12', proc.stdout)
+            self.assertIn('confirm: ticket #12 was inferred from branch "feature/12-x", not named by you', proc.stdout)
+            self.assertIn('repo: acme/issues', proc.stdout)
+            proc = run('--profile', 'Hub', '--branch', '12-a/issue-13')
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            lines = proc.stdout.splitlines()
+            self.assertEqual(lines[1:4], ['branch: "12-a/issue-13"', 'ticket: none', 'ticket-candidates: ["12", "13"]'])
+            self.assertEqual(len(lines), 5)
+            self.assertRegex(lines[4], r'^warning: ".*no origin remote')  # warnings show even without a ticket
+            self.assertNotIn('repo:', proc.stdout)
+            proc = run('--profile', 'Acme', '--branch', 'main')  # no project, no ticket: not an error
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn('ticket: none', proc.stdout)
+            self.assertNotIn('destination:', proc.stdout)
+            proc = run('--profile', 'Hub', '--branch', '`id`-12;$(x)')
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn('branch: "`id`-12;$(x)"', proc.stdout)
+            self.assertIn('ticket: none', proc.stdout)
+            proc = run('--profile', 'Hub', '--update', '12')
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn('leave out --update', proc.stderr)
+            proc = run('--profile', 'Acme', '--branch', 'abc-1-and-def-2')
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn('ticket-candidates: ["ABC-1", "DEF-2"]', proc.stdout)
+            proc = run('--profile', 'Hub', '--branch', 'issue-' + '9' * 40)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn('ticket: none', proc.stdout)
+            detached = subprocess.run(
+                [
+                    sys.executable,
+                    '-B',
+                    SCRIPT,
+                    '--check-destination',
+                    '--ticket-from-branch',
+                    '--profile',
+                    'Hub',
+                    '--repo',
+                    os.path.join(repo, 'not-a-repo'),
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+            self.assertEqual(detached.returncode, 0, detached.stderr)
+            self.assertIn('branch: ""', detached.stdout)
+            self.assertIn('ticket: none', detached.stdout)
+            proc = subprocess.run(
+                [sys.executable, '-B', SCRIPT, '--ticket-from-branch', '--profile', 'Hub', '--repo', repo],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+            self.assertNotEqual(proc.returncode, 0)
 
     def test_origin_is_printed_as_quoted_data(self):
         spec = {'summary': 'A summary', 'blocks': task(*VALID_TASK)}
