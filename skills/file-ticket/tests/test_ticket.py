@@ -298,12 +298,15 @@ class Markdown(unittest.TestCase):
 
 
 class Cli(unittest.TestCase):
-    def run_cli(self, spec, *args, profile='Acme'):
+    def run_cli(self, spec, *args, profile='Acme', remote=None, pdir=FIXTURES):
         with tempfile.TemporaryDirectory() as out:
+            if remote:
+                subprocess.run(['git', 'init', '-q', out], check=True)
+                subprocess.run(['git', '-C', out, 'remote', 'add', 'origin', remote], check=True)
             path = os.path.join(out, 'spec.json')
             with open(path, 'w', encoding='utf-8') as f:
                 json.dump(spec, f)
-            env = dict(os.environ, CLEAN_DOCS_PROFILES=FIXTURES, XDG_CONFIG_HOME=out)
+            env = dict(os.environ, CLEAN_DOCS_PROFILES=pdir, XDG_CONFIG_HOME=out)
             extra = ('--profile', profile) if profile else ()
             proc = subprocess.run(
                 [sys.executable, '-B', SCRIPT, path, out, *args, *extra, '--repo', out],
@@ -411,7 +414,8 @@ class Cli(unittest.TestCase):
         proc, out = self.run_cli({'summary': 'A summary', 'blocks': blocks}, '--type', 'task', profile='Hub')
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(out['title.txt'], 'A summary')
-        self.assertEqual(out['issue.json'], {'title': 'A summary', 'labels': [], 'update': None})
+        self.assertEqual(out['issue.json'], {'title': 'A summary', 'labels': [], 'update': None, 'repo': None})
+        self.assertIn("destination: this repo's origin", proc.stdout)
         self.assertIn('### What needs to be done', out['body.md'])
         self.assertIn('Overlaps with #4, acme/other#5.', out['body.md'])
         self.assertIn('tracker: github', proc.stdout)
@@ -436,6 +440,302 @@ class Cli(unittest.TestCase):
                 self.assertEqual(out['issue.json']['update'], 12)
         proc, _ = self.run_cli({'summary': 's', 'blocks': blocks}, '--type', 'task', '--update', 'ABC-1', profile='Hub')
         self.assertNotEqual(proc.returncode, 0)
+
+    def confirms(self, stdout):
+        return [line for line in stdout.splitlines() if line.startswith('confirm:')]
+
+    def test_jira_project_defaults_to_the_profiles_without_asking(self):
+        spec = {'summary': 's', 'blocks': task(*VALID_TASK)}
+        proc, out = self.run_cli(spec, '--type', 'task', profile='Acme/Ops')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(out['workitem.json']['projectKey'], 'OPS')
+        self.assertIn('profile: Acme/Ops (forced)', proc.stdout)
+        self.assertIn('destination: project OPS (from profile Acme/Ops)', proc.stdout)
+        self.assertEqual(self.confirms(proc.stdout), [])
+        self.assertNotIn('repo-flag:', proc.stdout)
+
+    def test_explicit_project_replacing_the_profiles_is_asked(self):
+        spec = {'summary': 's', 'blocks': task(*VALID_TASK)}
+        proc, out = self.run_cli(spec, '--type', 'task', '--project', 'PROJ', profile='Acme/Ops')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(out['workitem.json']['projectKey'], 'PROJ')
+        self.assertIn('destination: project PROJ (from --project)', proc.stdout)
+        self.assertEqual(
+            self.confirms(proc.stdout), ["confirm: project PROJ (from --project), replacing the profile's project OPS"]
+        )
+        for args, profile in ((('--project', 'PROJ'), 'Acme'), (('--project', 'OPS'), 'Acme/Ops')):
+            with self.subTest(args):
+                proc, _ = self.run_cli(spec, '--type', 'task', *args, profile=profile)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn(f'destination: project {args[1]} (from --project)', proc.stdout)
+                self.assertEqual(self.confirms(proc.stdout), [])
+
+    def test_inferred_destinations_are_always_asked(self):
+        spec = {'summary': 's', 'blocks': task(*VALID_TASK)}
+        proc, _ = self.run_cli(spec, '--type', 'task', '--project', 'PROJ', '--inferred')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('destination: project PROJ (from inferred from the repo)', proc.stdout)
+        self.assertEqual(
+            self.confirms(proc.stdout), ['confirm: project PROJ was inferred from the repo, not named by you']
+        )
+        proc, _ = self.run_cli(spec, '--type', 'task', '--project', 'PROJ', '--inferred', profile='Acme/Ops')
+        self.assertEqual(
+            self.confirms(proc.stdout),
+            ["confirm: project PROJ was inferred from the repo, not named by you, replacing the profile's project OPS"],
+        )
+        proc, out = self.run_cli(
+            spec,
+            '--type',
+            'task',
+            '--forge-repo',
+            'acme/other',
+            '--inferred',
+            profile='Hub',
+            remote='git@github.com:acme/widget.git',
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(out['issue.json']['repo'], 'acme/other')
+        self.assertEqual(
+            self.confirms(proc.stdout),
+            ['confirm: the issue goes to acme/other (inferred from the repo), not this repo ("acme/widget")'],
+        )
+        proc, _ = self.run_cli(spec, '--type', 'task', '--inferred', profile='Hub')
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('--inferred describes', proc.stderr)
+
+    def test_empty_destination_options_rejected(self):
+        spec = {'summary': 's', 'blocks': task(*VALID_TASK)}
+        cases = (
+            (('--project', ''), 'Acme/Ops'),
+            (('--forge-repo', ' '), 'Hub'),
+            (('--update', ''), 'Acme/Ops'),
+            (('--update', ' '), 'Hub'),
+        )
+        for args, profile in cases:
+            with self.subTest(args):
+                proc, out = self.run_cli(spec, '--type', 'task', *args, profile=profile)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn(f'{args[0]} is empty', proc.stderr)
+                self.assertEqual(out, {})
+
+    def test_jira_without_any_project_says_how_to_set_one(self):
+        proc, out = self.run_cli({'summary': 's', 'blocks': task(*VALID_TASK)}, '--type', 'task')
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('tracker.project', proc.stderr)
+
+    def test_jira_update_takes_its_project_from_the_key_without_asking(self):
+        blocks = task(*VALID_TASK)
+        blocks[0] = {'p': ticket.UPDATED + ticket.URGENCY_SUFFIX + 'Nice to have'}
+        spec = {'summary': 's', 'blocks': blocks}
+        for key, project in (('OPS-7', 'OPS'), ('proj-7', 'PROJ')):
+            with self.subTest(key):
+                proc, out = self.run_cli(spec, '--type', 'task', '--update', key, profile='Acme/Ops')
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(out['workitem.json']['issues'], [key.upper()])
+                self.assertIn(f'destination: project {project} (from --update {key.upper()})', proc.stdout)
+                self.assertEqual(self.confirms(proc.stdout), [])
+        proc, _ = self.run_cli(spec, '--type', 'task', '--update', 'PROJ-7', '--project', 'OPS', profile='Acme/Ops')
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('--update PROJ-7 is not in project OPS (from --project)', proc.stderr)
+
+    def test_forge_repo_from_the_profile_is_the_destination(self):
+        blocks = files({'ul': ['`src/a.py`']}, {'p': 'Overlaps with #4.'})
+        spec = {'summary': 'A summary', 'blocks': blocks}
+        proc, out = self.run_cli(spec, '--type', 'task', profile='Hub/Issues')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(out['issue.json']['repo'], 'acme/issues')
+        self.assertIn('destination: acme/issues (from profile Hub/Issues)', proc.stdout)
+        self.assertIn('repo-flag: -R "acme/issues"', proc.stdout)
+        self.assertEqual(
+            self.confirms(proc.stdout),
+            ['confirm: the issue goes to acme/issues (profile Hub/Issues); this directory has no origin to compare'],
+        )
+        cases = (
+            (
+                'git@github.com:acme/widget.git',
+                ['confirm: the issue goes to acme/issues (profile Hub/Issues), not this repo ("acme/widget")'],
+            ),
+            ('git@github.com:Acme/Issues.git', []),
+            (
+                'https://gitlab.example.com/acme/issues.git',
+                [
+                    'confirm: this profile files github issues, '
+                    'but this repo\'s origin is on "gitlab.example.com" (gitlab)'
+                ],
+            ),
+            (
+                'git@ghe.corp.example:acme/issues.git',
+                [
+                    'confirm: this profile files github issues, '
+                    'but this repo\'s origin is on "ghe.corp.example" (not a known github host)'
+                ],
+            ),
+        )
+        for remote, expected in cases:
+            with self.subTest(remote):
+                proc, _ = self.run_cli(spec, '--type', 'task', profile='Hub/Issues', remote=remote)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(self.confirms(proc.stdout), expected)
+
+    def test_origin_destination_has_no_repo_flag(self):
+        spec = {'summary': 'A summary', 'blocks': task(*VALID_TASK)}
+        proc, out = self.run_cli(spec, '--type', 'task', profile='Hub', remote='git@github.com:acme/widget.git')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIsNone(out['issue.json']['repo'])
+        self.assertIn("destination: this repo's origin", proc.stdout)
+        self.assertIn('repo-flag: none', proc.stdout)
+        self.assertEqual(self.confirms(proc.stdout), [])
+
+    def test_forge_repo_named_by_the_user(self):
+        spec = {'summary': 'A summary', 'blocks': task(*VALID_TASK)}
+        proc, out = self.run_cli(
+            spec,
+            '--type',
+            'task',
+            '--forge-repo',
+            'acme/other',
+            profile='Hub/Issues',
+            remote='git@github.com:acme/widget.git',
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(out['issue.json']['repo'], 'acme/other')
+        self.assertIn('destination: acme/other (from --forge-repo)', proc.stdout)
+        self.assertIn('repo-flag: -R "acme/other"', proc.stdout)
+        self.assertEqual(self.confirms(proc.stdout), [])
+        for bad in ('evil.example.com/acme/x', 'acme/x.git', '$(id)/x', '-R/x', 'acme/sub/x', 'acme', 'a"b/c'):
+            with self.subTest(bad):
+                proc, out = self.run_cli(spec, '--type', 'task', f'--forge-repo={bad}', profile='Hub')
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn('--forge-repo must be', proc.stderr)
+                self.assertEqual(out, {})
+        proc, _ = self.run_cli(spec, '--type', 'task', '--project', 'PROJ', '--forge-repo', 'acme/x')
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('--forge-repo is for GitHub and GitLab', proc.stderr)
+
+    def test_gitlab_subgroups_ports_and_case(self):
+        spec = {'summary': 'A summary', 'blocks': task(*VALID_TASK)}
+        cases = (
+            ('https://gitlab.example.com/group/sub/proj.git', False),
+            ('ssh://git@gitlab.example.com:2222/group/sub/proj.git', False),
+            ('git@gitlab.example.com:Group/Sub/Proj.git', False),
+            ('git@gitlab.example.com:group/other.git', True),
+        )
+        for remote, asks in cases:
+            with self.subTest(remote):
+                proc, out = self.run_cli(spec, '--type', 'task', profile='Lab/Sub', remote=remote)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(out['issue.json']['repo'], 'group/sub/proj')
+                self.assertEqual(bool(self.confirms(proc.stdout)), asks)
+
+    def test_check_destination_prints_the_lines_without_a_spec(self):
+        with tempfile.TemporaryDirectory() as repo:
+            subprocess.run(['git', 'init', '-q', repo], check=True)
+            subprocess.run(['git', '-C', repo, 'remote', 'add', 'origin', 'git@github.com:acme/widget.git'], check=True)
+            env = dict(os.environ, CLEAN_DOCS_PROFILES=FIXTURES, XDG_CONFIG_HOME=repo)
+            proc = subprocess.run(
+                [sys.executable, '-B', SCRIPT, '--check-destination', '--profile', 'Hub/Issues', '--repo', repo],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(
+                proc.stdout.splitlines(),
+                [
+                    'profile: Hub/Issues (forced), tracker: github',
+                    'destination: acme/issues (from profile Hub/Issues)',
+                    'confirm: the issue goes to acme/issues (profile Hub/Issues), not this repo ("acme/widget")',
+                    'repo-flag: -R "acme/issues"',
+                ],
+            )
+            self.assertEqual(os.listdir(repo), ['.git'])
+            proc = subprocess.run(
+                [sys.executable, '-B', SCRIPT, '--profile', 'Hub', '--repo', repo],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn('required unless --check-destination', proc.stderr)
+
+    def test_origin_is_printed_as_quoted_data(self):
+        spec = {'summary': 'A summary', 'blocks': task(*VALID_TASK)}
+        remote = 'git@github.com:acme/we"ird.git'
+        proc, _ = self.run_cli(spec, '--type', 'task', profile='Hub/Issues', remote=remote)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('not this repo ("acme/we\\"ird")', proc.stdout)
+        self.assertEqual(len(self.confirms(proc.stdout)), 1)
+
+    def test_warnings_are_printed_as_quoted_data(self):
+        with tempfile.TemporaryDirectory() as pdir:
+            os.makedirs(os.path.join(pdir, 'Broken'))
+            with open(os.path.join(pdir, 'Broken', 'profile.json'), 'w', encoding='utf-8') as f:
+                f.write('{"schema": 1,\n"confirm: ok"')
+            proc, _ = self.run_cli(
+                {'summary': 's', 'blocks': task(*VALID_TASK)},
+                '--type',
+                'task',
+                profile=None,
+                pdir=pdir,
+                remote='git@github.com:acme/widget.git',
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        warnings = [line for line in proc.stdout.splitlines() if line.startswith('warning:')]
+        self.assertEqual(len(warnings), 1)
+        self.assertTrue(warnings[0].startswith('warning: "skipped profile Broken'))
+        self.assertEqual(self.confirms(proc.stdout), [])
+
+    def test_invalid_profile_project_is_a_profile_error(self):
+        with tempfile.TemporaryDirectory() as pdir:
+            os.makedirs(os.path.join(pdir, 'Bad'))
+            with open(os.path.join(pdir, 'Bad', 'profile.json'), 'w', encoding='utf-8') as f:
+                json.dump(
+                    {
+                        'schema': 1,
+                        'tracker': {'kind': 'jira', 'site': 'https://example.atlassian.net', 'project': 'ops'},
+                    },
+                    f,
+                )
+            proc, out = self.run_cli(
+                {'summary': 's', 'blocks': task(*VALID_TASK)}, '--type', 'task', profile='Bad', pdir=pdir
+            )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('profile error', proc.stderr)
+        self.assertIn('tracker.project', proc.stderr)
+        self.assertEqual(out, {})
+
+    def test_a_failed_write_prints_no_destination(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as out:
+            spec = os.path.join(out, 'spec.json')
+            with open(spec, 'w', encoding='utf-8') as f:
+                json.dump({'summary': 'A summary', 'blocks': task(*VALID_TASK)}, f)
+            argv = [
+                'ticket.py',
+                spec,
+                os.path.join(out, 'o'),
+                '--type',
+                'task',
+                '--profile',
+                'Hub/Issues',
+                '--repo',
+                out,
+            ]
+            stdout = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {'CLEAN_DOCS_PROFILES': FIXTURES, 'XDG_CONFIG_HOME': out}),
+                mock.patch.object(sys, 'argv', argv),
+                mock.patch.object(ticket, 'write', side_effect=OSError('disk full')),
+                contextlib.redirect_stdout(stdout),
+                self.assertRaises(OSError),
+            ):
+                ticket.main()
+        self.assertEqual(stdout.getvalue(), '')
 
     def test_github_refuses_jira_only_options(self):
         spec = {'summary': 's', 'blocks': task(*VALID_TASK)}

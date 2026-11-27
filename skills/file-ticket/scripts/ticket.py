@@ -1,7 +1,19 @@
 """Build a ticket from a spec, enforcing the profile's template for its type, for the profile's tracker.
 
 Usage: python3 ticket.py SPEC.json OUT_DIR --type TYPE [--project KEY] [--projects ABC,XYZ]
-                         [--update REF] [--profile NAME] [--repo PATH]
+                         [--forge-repo OWNER/REPO] [--inferred] [--update REF]
+                         [--profile NAME] [--repo PATH]
+
+  python3 ticket.py --check-destination [the same destination options]
+
+Besides the files, it prints the profile, a "destination:" line, one "confirm:" line
+per reason the user should confirm where the ticket goes (a destination inferred
+rather than named, another repo than this one, a project replacing the profile's, an
+origin on a host the tracker doesn't match) and, on a forge, a "repo-flag:" line to
+add to every gh/glab command ("none": add nothing). Lines are printed only after every
+file is written. --check-destination prints the same lines without building, for
+reading an existing ticket before any spec exists. --inferred marks a --project or
+--forge-repo that came from the repo (branch, commits, README), not from the user.
 
 The house style comes from the clean-docs profile for the repo (scripts/house_style.py
 at the plugin root; --profile picks one by name). From it this script takes the
@@ -12,8 +24,12 @@ levels. Trackers:
                   ### headings) and OUT_DIR/issue.json ({"title", "labels", "update"}).
                   Labels come from the type's "labels". References are #12 or
                   group/repo#12, left for the forge to link. --update takes the issue
-                  number. --project, --projects and "fields" are Jira-only.
-  jira            A Jira work item. --project is required; --update takes a key in it.
+                  number. issue.json's "repo" is the repo the issue goes to: --forge-repo
+                  (one the user named), else the profile's tracker.repo, else null for
+                  the current repo's origin. --project,
+                  --projects and "fields" are Jira-only.
+  jira            A Jira work item. --project defaults to the project of the --update key,
+                  else the profile's tracker.project, and is required without either.
                   Writes OUT_DIR/description.md (Markdown for the Atlassian MCP's
                   createJiraIssue and editJiraIssue), and for the acli fallback
                   OUT_DIR/workitem.json (for `acli jira workitem create --from-json`,
@@ -456,37 +472,74 @@ def read_spec(path, max_summary):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    ap.add_argument('spec')
-    ap.add_argument('out_dir')
-    ap.add_argument('--type', required=True, type=str.lower)
+    ap.add_argument('spec', nargs='?')
+    ap.add_argument('out_dir', nargs='?')
+    ap.add_argument('--type', type=str.lower)
     ap.add_argument('--project', type=str.upper, help='Jira project key (Jira only)')
     ap.add_argument('--projects', default='', help='extra Jira project keys to link, comma-separated')
     ap.add_argument('--update', metavar='REF', help='existing ticket this replaces: a Jira key, or an issue number')
     ap.add_argument('--profile', help='profile name (default: the one matching --repo)')
     ap.add_argument('--repo', default='.', help='repo to match a profile for (default: %(default)s)')
+    ap.add_argument('--forge-repo', help='GitHub/GitLab repo the issue goes to, when the user names one')
+    ap.add_argument(
+        '--inferred',
+        action='store_true',
+        help='--project/--forge-repo was inferred from the repo, not named by the user',
+    )
+    ap.add_argument(
+        '--check-destination', action='store_true', help='print the destination lines only; no spec, no files'
+    )
     args = ap.parse_args()
+    if not args.check_destination and not (args.spec and args.out_dir and args.type):
+        ap.error('SPEC, OUT_DIR and --type are required unless --check-destination is given')
 
     profile = load_profile(args.repo, args.profile)
     kind = profile['tracker']['kind']
     types = profile['tickets']['types']
-    if args.type not in types:
+    if args.type is not None and args.type not in types:
         sys.exit(f"--type must be one of the profile's types: {sorted(types)}")
-    template = template_for(profile, args.type)
 
+    resolved = profile['resolved']
+    shown = f'{resolved["name"]}/{resolved["override"]}' if resolved.get('override') else resolved['name']
+    confirms = []
+    for flag, value in (('--project', args.project), ('--forge-repo', args.forge_repo), ('--update', args.update)):
+        if value is not None and not value.strip():
+            sys.exit(f'{flag} is empty; leave it out instead')
+    if args.inferred and args.project is None and args.forge_repo is None:
+        sys.exit('--inferred describes --project or --forge-repo; give one')
     if kind == 'jira':
-        if not (args.project and re.fullmatch(PROJECT_KEY, args.project)):
-            sys.exit('--project must be a Jira project key such as ABC')
+        if args.forge_repo is not None:
+            sys.exit(f'--forge-repo is for GitHub and GitLab; this profile files {kind} tickets')
+        default = profile['tracker'].get('project')
+        update = args.update.strip().upper() if args.update else None
+        if update and not re.fullmatch(rf'{PROJECT_KEY}-\d+', update):
+            sys.exit('--update takes a ticket key such as ABC-123')
+        if args.project is not None:
+            source = 'inferred from the repo' if args.inferred else '--project'
+        elif update:
+            args.project, source = update.rsplit('-', 1)[0], f'--update {update}'
+        elif default:
+            args.project, source = default, f'profile {shown}'
+        else:
+            sys.exit('--project is needed: this profile sets no "tracker.project"')
+        if not re.fullmatch(PROJECT_KEY, args.project):
+            sys.exit(f'--project must be a Jira project key such as ABC, not {json.dumps(args.project)}')
+        if update and not update.startswith(args.project + '-'):
+            sys.exit(f'--update {update} is not in project {args.project} (from {source})')
+        destination = f'project {args.project} (from {source})'
+        replaces = f", replacing the profile's project {default}" if default and default != args.project else ''
+        if args.inferred:
+            confirms.append(f'confirm: project {args.project} was inferred from the repo, not named by you{replaces}')
+        elif source == '--project' and replaces:
+            confirms.append(f'confirm: project {args.project} (from --project){replaces}')
         extra = [k.strip().upper() for k in args.projects.split(',') if k.strip()]
         bad = [k for k in extra if not re.fullmatch(PROJECT_KEY, k)]
         if bad:
             sys.exit(f'--projects takes project keys such as ABC, not {bad}')
-        update = args.update.upper() if args.update else None
-        if update and not re.fullmatch(rf'{re.escape(args.project)}-\d+', update):
-            sys.exit('--update takes a ticket key in --project, such as ABC-123')
         browse = profile['tracker']['site'].rstrip('/') + '/browse/'
         tracker = jira(list(dict.fromkeys(profile['tracker']['link_projects'] + [args.project] + extra)), browse)
     else:
-        if args.project or args.projects:
+        if args.project is not None or args.projects:
             sys.exit(f'--project and --projects are Jira-only; this profile files {kind} issues')
         update = None
         if args.update:
@@ -495,6 +548,19 @@ def main():
                 sys.exit('--update takes an issue number such as 12 or #12')
             update = int(m.group(1))
         tracker = forge(kind)
+        repo, destination, more = forge_destination(
+            kind, args.forge_repo, args.inferred, profile['tracker'].get('repo'), shown, resolved
+        )
+        confirms += more
+
+    head = [f'profile: {shown} ({resolved["from"]}), tracker: {kind}', f'destination: {destination}', *confirms]
+    if kind != 'jira':
+        head.append(f'repo-flag: -R "{repo}"' if repo else 'repo-flag: none')
+    head += [f'warning: {json.dumps(w)}' for w in resolved.get('warnings', [])]
+    if args.check_destination:
+        print('\n'.join(head))
+        return
+    template = template_for(profile, args.type)
 
     summary, blocks, fields = read_spec(args.spec, profile['tickets']['max_summary'])
     check_fields(fields)
@@ -503,11 +569,7 @@ def main():
     check(blocks, template, tracker, update is not None)
 
     prepare(args.out_dir)
-    resolved = profile['resolved']
-    shown = f'{resolved["name"]}/{resolved["override"]}' if resolved.get('override') else resolved['name']
-    print(f'profile: {shown} ({resolved["from"]}), tracker: {kind}')
-    for warning in resolved.get('warnings', []):
-        print(f'warning: {warning}')
+    report = []
     if kind == 'jira':
         description = adf(blocks, tracker)
         if update:
@@ -524,17 +586,57 @@ def main():
         write(args.out_dir, 'workitem.json', workitem)
         write(args.out_dir, 'description.json', description)
         write(args.out_dir, 'description.md', markdown(blocks, tracker))
-        print(f'linkable keys: {[k for k in references(blocks, tracker) if k != update]}')
-        print(f'fields: {json.dumps(fields)}')
+        report.append(f'linkable keys: {[k for k in references(blocks, tracker) if k != update]}')
+        report.append(f'fields: {json.dumps(fields)}')
         if update and fields:
-            print('note: workitem.json carries no fields in update mode; set them with editJiraIssue additional_fields')
+            report.append(
+                'note: workitem.json carries no fields in update mode; set them with editJiraIssue additional_fields'
+            )
     else:
         labels = types[args.type]['labels']
         write(args.out_dir, 'title.txt', summary)
         write(args.out_dir, 'body.md', markdown(blocks, tracker))
-        write(args.out_dir, 'issue.json', {'title': summary, 'labels': labels, 'update': update})
-        print(f'references: {references(blocks, tracker)}')
-        print(f'labels: {json.dumps(labels)}')
+        write(args.out_dir, 'issue.json', {'title': summary, 'labels': labels, 'update': update, 'repo': repo})
+        report.append(f'references: {references(blocks, tracker)}')
+        report.append(f'labels: {json.dumps(labels)}')
+    # Printed only once every file is written, so a failed build never shows a destination.
+    print('\n'.join(head + report))
+
+
+def forge_destination(kind, named, inferred, profile_repo, shown, resolved):
+    """(repo or None, destination line, confirm lines) for a forge issue.
+
+    The repo is --forge-repo, else the profile's tracker.repo, else None for this repo's origin.
+    The user confirms what is unusual: a repo they didn't name that isn't this one, and an origin
+    whose host isn't a known host for this tracker (gh and glab -R would reach their default server).
+    """
+    if named is not None:
+        if not house_style.forge_repo_ok(named) or (kind == 'github' and named.count('/') != 1):
+            sys.exit(
+                '--forge-repo must be owner/repo (GitLab: group/sub/repo), with no host and no .git, '
+                f'not {json.dumps(named)}'
+            )
+        repo, source = named, 'inferred from the repo' if inferred else '--forge-repo'
+    else:
+        repo, source = profile_repo, f'profile {shown}'
+    remote = resolved.get('remote') or ''
+    host, _, origin = remote.partition('/')
+    confirms = []
+    if remote:
+        origin_kind = house_style.infer_tracker(remote)
+        if origin_kind != kind:
+            what = origin_kind if origin_kind in FORGES else f'not a known {kind} host'
+            on = f'{json.dumps(host)} ({what})'
+            confirms.append(f"confirm: this profile files {kind} issues, but this repo's origin is on {on}")
+    if repo is None:
+        return None, "this repo's origin", confirms
+    if source == '--forge-repo':
+        return repo, f'{repo} (from {source})', confirms  # the user named it
+    if not origin:
+        confirms.append(f'confirm: the issue goes to {repo} ({source}); this directory has no origin to compare')
+    elif repo.lower() != origin.lower():
+        confirms.append(f'confirm: the issue goes to {repo} ({source}), not this repo ({json.dumps(origin)})')
+    return repo, f'{repo} (from {source})', confirms
 
 
 if __name__ == '__main__':

@@ -1,5 +1,21 @@
 {
   "schema": 1,
-  "tracker": {"kind": "github"},
-  "tickets": {"max_summary": 74}
+  "tracker": {
+    "kind": "github"
+  },
+  "tickets": {
+    "max_summary": 74
+  },
+  "overrides": {
+    "Issues": {
+      "match": {
+        "repos": [
+          "hub-app"
+        ]
+      },
+      "tracker": {
+        "repo": "acme/issues"
+      }
+    }
+  }
 }

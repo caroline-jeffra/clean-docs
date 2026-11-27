@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "tracker": {
+    "kind": "gitlab"
+  },
+  "tickets": {
+    "max_summary": 74
+  },
+  "overrides": {
+    "Sub": {
+      "match": {
+        "repos": [
+          "lab-app"
+        ]
+      },
+      "tracker": {
+        "repo": "group/sub/proj"
+      }
+    }
+  }
+}
